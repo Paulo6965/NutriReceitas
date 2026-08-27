@@ -24,7 +24,7 @@ conexao.connect((erro) => {
     console.log("Conectado ao MySQL com sucesso!");
 });
 
-//criando o servidor na porta 3000 usa req e res para receber os pedidos e enviar as informações 
+//criando um codigo basico de front para rodar no servidor com alguns comandos de back como req(request) e res(respond)
 app.get("/", (req, res) => {  
     res.send(`
         <h1>Cadastro de usuário</h1>
@@ -61,5 +61,5 @@ app.post("/usuarios", (req, res) => {
 });
 
 app.listen(porta, () => {
-    console.log(`Servidor rodando em http://localhost:${porta}`); //Comando utilizado para ele ouvir o servidor criado e pode receber as informações do front e enviar para o DB
+    console.log(`Servidor rodando em http://localhost:${porta}`); //Criando o servidor e dizendo para o codigo ouvir o que acontece nele
 });
