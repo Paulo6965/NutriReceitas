@@ -1,12 +1,12 @@
-const express = require("express");
-const mysql = require("mysql2");
+const express = require("express"); //importando express
+const mysql = require("mysql2"); // importando mysql2 para fazer a conexão com node js
 
-const app = express();
-const porta = 3000;
+const app = express(); //Definindo qual vai ser a variavel para express nese caso "app"
+const porta = 3000; //definindo qual vai ser a porta utilizada no servidor
 
 app.use(express.urlencoded({ extended: true }));
 
-const conexao = mysql.createConnection({
+const conexao = mysql.createConnection({  //Criando conexão com o MySQL e fornecendo as informaçoes necessarias
     host: "localhost",
     port: 3306,
     user: "root",
@@ -24,7 +24,8 @@ conexao.connect((erro) => {
     console.log("Conectado ao MySQL com sucesso!");
 });
 
-app.get("/", (req, res) => {
+//criando o servidor na porta 3000 usa req e res para receber os pedidos e enviar as informações 
+app.get("/", (req, res) => {  
     res.send(`
         <h1>Cadastro de usuário</h1>
 
@@ -43,7 +44,7 @@ app.post("/usuarios", (req, res) => {
 
     console.log("Nome recebido:", nome);
 
-    const sql = "INSERT INTO usuarios (nome) VALUES (?)";
+    const sql = "INSERT INTO usuarios (nome) VALUES (?)";  //comando usado para fazer insert nas tabelas do MySQl (?) 
 
     conexao.query(sql, [nome], (erro, resultado) => {
 
@@ -60,5 +61,5 @@ app.post("/usuarios", (req, res) => {
 });
 
 app.listen(porta, () => {
-    console.log(`Servidor rodando em http://localhost:${porta}`);
+    console.log(`Servidor rodando em http://localhost:${porta}`); //Comando utilizado para ele ouvir o servidor criado e pode receber as informações do front e enviar para o DB
 });
