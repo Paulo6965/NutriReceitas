@@ -1,0 +1,29 @@
+                  ┌───────────────┐
+                  │   Frontend    │
+                  │ Chat / Voice  │
+                  └───────┬───────┘
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │ API / Gateway │
+                  └───────┬───────┘
+                          │
+              ┌───────────▼───────────┐
+              │    Agent Orchestrator │
+              └───────────┬───────────┘
+                          │
+          ┌───────────────┼────────────────┐
+          ▼               ▼                ▼
+    Recipe Tools     Nutrition Tools   User Tools
+          │               │                │
+          └───────────────┼────────────────┘
+                          ▼
+                  ┌───────────────┐
+                  │    MySQL      │
+                  │ Source Truth  │
+                  └───────────────┘
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+           Redis                Vector Search
+       cache/session           semantic memory

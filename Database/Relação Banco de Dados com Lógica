@@ -1,0 +1,29 @@
+USERS
+ │
+ ├── user_preferences
+ ├── user_dietary_restrictions
+ ├── user_ingredient_preferences
+ ├── user_ingredients
+ ├── user_favorite_recipes
+ ├── user_recipe_history
+ ├── meal_logs
+ ├── user_nutrition_goals
+ ├── conversations
+ │      └── conversation_messages
+ │
+ └── agent_memories
+
+
+INGREDIENTS
+ │
+ ├── ingredient_aliases
+ └── recipe_ingredients
+             │
+             ▼
+          RECIPES
+             │
+       ┌─────┼───────────┐
+       ▼     ▼           ▼
+ recipe_tags  recipe_nutrition
+       │
+      TAGS
