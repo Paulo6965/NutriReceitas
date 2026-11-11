@@ -1,7 +1,7 @@
 /* NutriReceitas — auth.js
-   Login/cadastro de demonstração, animações do painel e menu do usuário. */
+   Autenticação via Firebase (Email/Senha e Google) + animações do painel de login. */
 
-// ---- Login / Cadastro (demonstração — Supabase depois) ----
+// ── Aba ativa no modal (login | register) ───────────────────────────────────
 let authTab = 'login';
 $('#auth-tabs').addEventListener('click', e => {
   const b = e.target.closest('[data-tab]'); if (!b) return;
@@ -12,24 +12,143 @@ $('#auth-tabs').addEventListener('click', e => {
   $('#auth-submit').textContent = authTab === 'login' ? 'Entrar' : 'Criar conta grátis';
   AuthArt.start(authTab);
 });
-function signIn(user) {
-  // TODO Supabase: supabase.auth.signInWithPassword / signUp
-  state.user = user; db.set('nr:session', user);
-  closeModal($('#auth-modal')); afterAuthChange();
-  toast(`Bem-vindo(a), ${user.name.split(' ')[0]}!`);
+
+// ── Helpers internos ────────────────────────────────────────────────────────
+function _applySession(fbUser, displayName) {
+  state.user = {
+    name:  fbUser.displayName || displayName || fbUser.email.split('@')[0],
+    email: fbUser.email,
+    uid:   fbUser.uid,
+    role:  'user', // padrão; admin pode ser definido via Firestore custom claim futuramente
+  };
+  db.set('nr:session', state.user);
 }
-$('#auth-form').addEventListener('submit', e => {
+
+function _resetBtn() {
+  const btn = $('#auth-submit');
+  btn.disabled = false;
+  btn.textContent = authTab === 'login' ? 'Entrar' : 'Criar conta grátis';
+}
+
+// ── Login com Email/Senha ───────────────────────────────────────────────────
+async function signInWithEmail(email, password, name) {
+  try {
+    const cred = await firebaseAuth.signIn(email, password);
+    _applySession(cred.user, name);
+    closeModal($('#auth-modal'));
+    afterAuthChange();
+    toast(`Bem-vindo(a), ${state.user.name.split(' ')[0]}!`);
+  } catch (e) {
+    // Se o usuário não existe, cria a conta automaticamente
+    if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential') {
+      await signUpWithEmail(email, password, name);
+    } else {
+      _resetBtn();
+      const msgs = {
+        'auth/wrong-password':    'Senha incorreta.',
+        'auth/invalid-email':     'E-mail inválido.',
+        'auth/too-many-requests': 'Muitas tentativas. Tente mais tarde.',
+      };
+      toast(msgs[e.code] || 'Erro: ' + e.message);
+    }
+  }
+}
+
+// ── Cadastro com Email/Senha ────────────────────────────────────────────────
+async function signUpWithEmail(email, password, name) {
+  try {
+    const cred = await firebaseAuth.signUp(email, password);
+    // Salva o nome de exibição no Firebase Auth
+    await firebaseAuth.updateProfile(cred.user, { displayName: name });
+    _applySession(cred.user, name);
+    closeModal($('#auth-modal'));
+    afterAuthChange();
+    toast(`Conta criada! Bem-vindo(a), ${state.user.name.split(' ')[0]}!`);
+  } catch (e) {
+    _resetBtn();
+    const msgs = {
+      'auth/email-already-in-use': 'Este e-mail já está cadastrado. Use "Entrar".',
+      'auth/weak-password':        'Senha muito fraca (mínimo 6 caracteres).',
+      'auth/invalid-email':        'E-mail inválido.',
+    };
+    toast(msgs[e.code] || 'Erro ao criar conta: ' + e.message);
+  }
+}
+
+// ── Login com Google ────────────────────────────────────────────────────────
+$('#google-btn').addEventListener('click', async () => {
+  try {
+    const result = await firebaseAuth.signInWithGoogle();
+    _applySession(result.user, result.user.displayName);
+    closeModal($('#auth-modal'));
+    afterAuthChange();
+    toast(`Bem-vindo(a), ${state.user.name.split(' ')[0]}!`);
+  } catch (e) {
+    if (e.code !== 'auth/popup-closed-by-user') {
+      toast('Erro com Google: ' + e.message);
+    }
+  }
+});
+
+// ── Submit do formulário ────────────────────────────────────────────────────
+$('#auth-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const email    = $('#auth-email').value.trim();
+  const password = $('#auth-pass').value;
+  const name     = (authTab === 'register' && $('#auth-name').value.trim()) || email.split('@')[0];
+
+  const btn = $('#auth-submit');
+  btn.disabled = true;
+  btn.textContent = 'Aguarde…';
+
+  if (authTab === 'login') {
+    await signInWithEmail(email, password, name);
+  } else {
+    await signUpWithEmail(email, password, name);
+  }
+});
+
+// ── Recuperar senha ─────────────────────────────────────────────────────────
+$('#forgot-row').addEventListener('click', async e => {
   e.preventDefault();
   const email = $('#auth-email').value.trim();
-  const name = (authTab === 'register' && $('#auth-name').value.trim()) || email.split('@')[0];
-  const btn = $('#auth-submit'); btn.disabled = true; btn.textContent = 'Aguarde…';
-  setTimeout(() => { btn.disabled = false; btn.textContent = authTab === 'login' ? 'Entrar' : 'Criar conta grátis'; e.target.reset(); signIn({ name, email }); }, 700);
+  if (!email) { toast('Digite seu e-mail primeiro.'); return; }
+  try {
+    await firebaseAuth.sendPasswordReset(email);
+    toast('E-mail de recuperação enviado!');
+  } catch {
+    toast('Não foi possível enviar o e-mail de recuperação.');
+  }
 });
-$('#google-btn').addEventListener('click', () => signIn({ name: 'Chef Convidado', email: 'demo@google.fake' }));
-function signOut() { state.user = null; db.del('nr:session'); afterAuthChange(); toast('Você saiu da conta'); }
+
+// ── Logout ──────────────────────────────────────────────────────────────────
+async function signOut() {
+  await firebaseAuth.signOut();
+  state.user = null;
+  db.del('nr:session');
+  afterAuthChange();
+  toast('Você saiu da conta');
+}
+
+// ── Abre o modal de login ───────────────────────────────────────────────────
 const openAuth = () => { openModal($('#auth-modal')); AuthArt.start(authTab); };
 
-/* ---------- Animações em loop do lado esquerdo do login/cadastro ----------
+// ── Listener global do Firebase Auth (detecta sessão salva ao recarregar) ───
+window.addEventListener('firebase:authchange', async (e) => {
+  const fbUser = e.detail;
+  if (fbUser && !state.user) {
+    // Recarregamento de página com sessão ativa no Firebase
+    _applySession(fbUser, fbUser.displayName);
+    afterAuthChange();
+  } else if (!fbUser && state.user) {
+    // Sessão expirou no Firebase
+    state.user = null;
+    db.del('nr:session');
+    afterAuthChange();
+  }
+});
+
+/* ── Animações em loop do lado esquerdo do modal ───────────────────────────
    Entrar:      digita ingredientes → viram etiquetas → NutriChef responde →
                 receita aparece, anel enche até 100% → receita é favoritada.
    Criar conta: estoque vai sendo preenchido → barras do "seu gosto" crescem →
@@ -37,14 +156,14 @@ const openAuth = () => { openModal($('#auth-modal')); AuthArt.start(authTab); };
 const AuthArt = {
   timers: [], intervals: [],
   COPY: {
-    login: ['Seu NutriChef está te esperando.', 'Continue de onde parou: favoritos, estoque e recomendações no seu gosto.'],
-    register: ['Monte sua cozinha inteligente.', 'Cadastre o que tem em casa e receba receitas que aprendem o seu gosto.'],
+    login:    ['Seu NutriChef está te esperando.', 'Continue de onde parou: favoritos, estoque e recomendações no seu gosto.'],
+    register: ['Monte sua cozinha inteligente.',   'Cadastre o que tem em casa e receba receitas que aprendem o seu gosto.'],
   },
-  at(ms, fn) { this.timers.push(setTimeout(fn, ms)); },
-  every(ms, fn) { const id = setInterval(fn, ms); this.intervals.push(id); return id; },
-  stop() { this.timers.forEach(clearTimeout); this.intervals.forEach(clearInterval); this.timers = []; this.intervals = []; },
+  at(ms, fn)     { this.timers.push(setTimeout(fn, ms)); },
+  every(ms, fn)  { const id = setInterval(fn, ms); this.intervals.push(id); return id; },
+  stop()         { this.timers.forEach(clearTimeout); this.intervals.forEach(clearInterval); this.timers = []; this.intervals = []; },
   on(scene, key) { const el = $(`[data-a="${key}"]`, scene); if (el) el.classList.add('on'); },
-  count(from, to, ms, cb) { // anima um número de "from" até "to"
+  count(from, to, ms, cb) {
     const t0 = performance.now();
     const id = this.every(30, () => {
       const k = Math.min(1, (performance.now() - t0) / ms), e = 1 - Math.pow(1 - k, 3);
@@ -57,8 +176,9 @@ const AuthArt = {
     $$('.a-item, .a-heart', scene).forEach(e => e.classList.remove('on'));
     const type = $('[data-type]', scene); if (type) type.textContent = '';
     const dots = $('[data-dots]', scene); if (dots) dots.classList.remove('hidden');
-    const bt = $('[data-bottext]', scene); if (bt) bt.classList.add('hidden');
-    const ring = $('[data-ring]', scene); if (ring) { ring.style.setProperty('--p', 0); $('[data-ring-text]', scene).textContent = '0%'; $('[data-match]', scene).textContent = 'Combinando…'; }
+    const bt   = $('[data-bottext]', scene); if (bt) bt.classList.add('hidden');
+    const ring = $('[data-ring]', scene);
+    if (ring) { ring.style.setProperty('--p', 0); $('[data-ring-text]', scene).textContent = '0%'; $('[data-match]', scene).textContent = 'Combinando…'; }
     const cnt = $('[data-count]', scene); if (cnt) cnt.textContent = '0 itens';
     $$('.a-bar i', scene).forEach(i => i.style.width = '0');
     $$('[data-pct]', scene).forEach(p => p.textContent = '0%');
@@ -66,10 +186,10 @@ const AuthArt = {
   start(tab) {
     this.stop();
     const name = tab === 'register' ? 'register' : 'login';
-    $('#scene-login').classList.toggle('hidden', name !== 'login');
+    $('#scene-login').classList.toggle('hidden',    name !== 'login');
     $('#scene-register').classList.toggle('hidden', name !== 'register');
     $('#auth-art-title').textContent = this.COPY[name][0];
-    $('#auth-art-sub').textContent = this.COPY[name][1];
+    $('#auth-art-sub').textContent   = this.COPY[name][1];
     const scene = $('#scene-' + name);
     if (reduceMotion) { this.finalState(scene, name); return; }
     name === 'login' ? this.loopLogin(scene) : this.loopRegister(scene);
@@ -100,8 +220,8 @@ const AuthArt = {
     this.reset(scene);
     const cnt = $('[data-count]', scene);
     const setCount = (n) => { cnt.textContent = `${n} ${n === 1 ? 'item' : 'itens'}`; cnt.classList.add('bump'); setTimeout(() => cnt.classList.remove('bump'), 220); };
-    this.at(300, () => this.on(scene, 'stock'));
-    this.at(900, () => { this.on(scene, 'r1'); setCount(1); });
+    this.at(300,  () => this.on(scene, 'stock'));
+    this.at(900,  () => { this.on(scene, 'r1'); setCount(1); });
     this.at(1500, () => { this.on(scene, 'r2'); setCount(2); });
     this.at(2100, () => { this.on(scene, 'r3'); setCount(3); });
     this.at(2900, () => this.on(scene, 'taste'));
@@ -113,7 +233,7 @@ const AuthArt = {
     this.at(8400, () => scene.classList.add('fading'));
     this.at(9000, () => this.loopRegister(scene));
   },
-  finalState(scene, name) { // sem animação (usuário prefere movimento reduzido)
+  finalState(scene, name) {
     this.reset(scene);
     $$('.a-item, .a-heart', scene).forEach(e => e.classList.add('on'));
     if (name === 'login') {
@@ -129,13 +249,20 @@ const AuthArt = {
   },
 };
 
+// ── Botões de abertura de modal ─────────────────────────────────────────────
 $$('[data-open-modal]').forEach(a => a.addEventListener('click', e => {
   e.preventDefault();
   ({ favs: openFavs, stock: openStock, auth: () => state.user ? toast('Você já está conectado') : openAuth() })[a.dataset.openModal]();
 }));
 
+// ── Menu do usuário logado ──────────────────────────────────────────────────
 let userMenuOpen = false;
-document.addEventListener('click', e => { if (userMenuOpen && !e.target.closest('#user-btn')) { $('#user-menu')?.classList.add('hidden'); userMenuOpen = false; } });
+document.addEventListener('click', e => {
+  if (userMenuOpen && !e.target.closest('#user-btn')) {
+    $('#user-menu')?.classList.add('hidden'); userMenuOpen = false;
+  }
+});
+
 function renderAuthSlot() {
   const slot = $('#auth-slot');
   if (!state.user) {
@@ -151,7 +278,10 @@ function renderAuthSlot() {
         <span class="hidden sm:inline max-w-[120px] truncate">${esc(state.user.name)}</span>
       </button>
       <div id="user-menu" class="menu hidden absolute right-0 top-full mt-2 w-60 z-50" role="menu">
-        <div class="px-3 py-2.5 border-b border-[var(--line)] mb-1"><div class="text-sm font-bold truncate">${esc(state.user.name)}</div><div class="text-xs text-[var(--ink-3)] truncate">${esc(state.user.email)}</div></div>
+        <div class="px-3 py-2.5 border-b border-[var(--line)] mb-1">
+          <div class="text-sm font-bold truncate">${esc(state.user.name)}</div>
+          <div class="text-xs text-[var(--ink-3)] truncate">${esc(state.user.email)}</div>
+        </div>
         <button class="menu-item" id="um-favs">♡ Meus favoritos</button>
         <button class="menu-item" id="um-stock">▢ Meu estoque</button>
         <button class="menu-item" id="um-reset">↺ Reiniciar recomendações</button>
@@ -159,23 +289,29 @@ function renderAuthSlot() {
         <button class="menu-item !text-[var(--danger)]" id="um-logout">Sair</button>
       </div>
     </div>`;
-  $('#user-btn').addEventListener('click', () => { $('#user-menu').classList.toggle('hidden'); userMenuOpen = !$('#user-menu').classList.contains('hidden'); });
+  $('#user-btn').addEventListener('click', () => {
+    $('#user-menu').classList.toggle('hidden');
+    userMenuOpen = !$('#user-menu').classList.contains('hidden');
+  });
   $('#um-favs').addEventListener('click', openFavs);
   $('#um-stock').addEventListener('click', openStock);
   $('#um-reset').addEventListener('click', () => { db.del(userKey('profile')); renderReco(); toast('Recomendações reiniciadas'); });
   $('#um-logout').addEventListener('click', signOut);
 }
+
 function updateBadges() {
   const f = Favs.all().length, s = Stock.all().length;
   $('#fav-count').textContent = f; $('#fav-count').classList.toggle('has', f > 0);
   $('#stock-count').textContent = s; $('#stock-count').classList.toggle('has', s > 0);
   const ck = Cooked.all().length;
   $('#cooked-count').textContent = ck; $('#cooked-count').classList.toggle('has', ck > 0);
-  Notify.sync(); // estoque mudou ou trocou de conta → verifica avisos de validade
+  Notify.sync();
   renderStockPreview();
 }
-// Ao entrar/sair/trocar de conta: carrega TUDO daquele usuário (sessão, conversa, contadores, recomendações)
+
+// Ao entrar/sair/trocar de conta: carrega TUDO daquele usuário
 function afterAuthChange() {
   const prefs = state.user ? db.get(userKey('prefs'), null) : null;
   if (prefs?.theme && prefs.theme !== document.documentElement.dataset.theme) setTheme(prefs.theme);
-  restoreSession(); renderAuthSlot(); updateBadges(); renderReco(); renderResults(); restoreChat(); }
+  restoreSession(); renderAuthSlot(); updateBadges(); renderReco(); renderResults(); restoreChat();
+}

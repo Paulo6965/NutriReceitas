@@ -78,13 +78,9 @@
 
         <!-- NutriChef -->
         <div class="relative">
-          <div class="float-card hidden xl:flex -left-14 -bottom-12" aria-hidden="true">
-            <img src="Imagens/receitas/1510693206972-df098062cb71.jpg" alt="" onerror="this.remove()">
-            <div><b class="block text-[13px]">Frittata de legumes</b><span class="text-[var(--green)] font-bold">Você tem 4 de 5</span></div>
-          </div>
           <div class="float-card hidden xl:flex -right-8 -top-12" style="animation-delay:-3s" aria-hidden="true">
             <span class="w-9 h-9 rounded-full bg-[var(--green-50)] text-[var(--green)] grid place-items-center font-black">✓</span>
-            <div><b class="block text-[13px]">3 receitas encontradas</b><span class="text-[var(--ink-3)]">com frango e batata</span></div>
+            <div><b class="block text-[13px]">Receitas sob medida</b><span class="text-[var(--ink-3)]">com o que você tem</span></div>
           </div>
 
           <div class="chef-card overflow-hidden" aria-label="Assistente NutriChef">
@@ -462,7 +458,7 @@
           <div><label class="lbl" for="auth-email">E-mail</label><input id="auth-email" type="email" class="field w-full" placeholder="voce@email.com" required></div>
           <div>
             <div class="flex items-center justify-between"><label class="lbl" for="auth-pass">Senha</label>
-              <a href="#" id="forgot-row" class="text-xs font-semibold text-[var(--green)] hover:underline mb-1.5" onclick="toast('Recuperação de senha chega com o Supabase');return false;">Esqueci a senha</a></div>
+              <a href="#" id="forgot-row" class="text-xs font-semibold text-[var(--green)] hover:underline mb-1.5">Esqueci a senha</a></div>
             <input id="auth-pass" type="password" class="field w-full" placeholder="Mínimo de 6 caracteres" minlength="6" required>
           </div>
           <button class="btn btn-primary w-full" id="auth-submit">Entrar</button>
@@ -472,7 +468,7 @@
           <svg class="w-4 h-4" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
           Continuar com Google
         </button>
-        <p class="mt-5 text-center text-xs text-[var(--ink-3)]">Tela de demonstração — a autenticação real será feita com Supabase.</p>
+        <p class="mt-5 text-center text-xs text-[var(--ink-3)]">Seus dados são protegidos com Firebase Auth &amp; Firestore.</p>
       </div>
     </div>
   </div>
@@ -485,6 +481,8 @@
   <div id="toast" class="px-4 py-2.5 rounded-xl text-sm font-semibold shadow-xl"></div>
 
   <!-- Scripts (ordem importa: cada arquivo usa o que os anteriores definem) -->
+  <!-- Firebase: carregado como módulo ES para usar o SDK moderno via CDN -->
+  <script type="module" src="js/firebase.js"></script>
   <script src="js/utils.js"></script>
   <script src="js/storage.js"></script>
   <script src="js/catalog.js"></script>

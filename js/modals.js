@@ -44,13 +44,36 @@ let modalUnit = {};          // unidade escolhida para exibir/editar cada ingred
 // Escala final de um ingrediente = porções × ajuste manual
 const ingFactor = (k) => (modalServes / modalRecipe.serves) * (modalAdj[k] ?? 1);
 // Unidades de exibição possíveis para a unidade base do ingrediente
-const UNIT_OPTS = { g: ['g', 'kg'], ml: ['ml', 'L'], un: ['un', 'g'] };
-const UNIT_MULT = { g: 1, kg: 1000, ml: 1, L: 1000, un: 1 };
-// Quantas unidades-base cabem em 1 da unidade escolhida (ovo em "g": 1 g = 1/50 un)
-const unitMult = (k, baseU, unit) => baseU === 'un' && unit === 'g' ? 1 / (Nutrition.ref(k)?.unitG || 100) : UNIT_MULT[unit];
+const UNIT_OPTS = {
+  g: ['g', 'kg', 'xícara', 'colher (sopa)', 'colher (chá)'],
+  ml: ['ml', 'L', 'xícara', 'colher (sopa)', 'colher (chá)'],
+  un: ['un', 'g', 'xícara', 'colher (sopa)']
+};
+const UNIT_MULT = {
+  g: 1, kg: 1000,
+  ml: 1, L: 1000,
+  un: 1,
+  'xícara': 240,
+  'xícaras': 240,
+  'colher (sopa)': 15,
+  'colheres (sopa)': 15,
+  'colher (chá)': 5,
+  'colheres (chá)': 5
+};
+// Quantas unidades-base cabem em 1 da unidade escolhida
+const unitMult = (k, baseU, unit) => {
+  if (baseU === 'un' && unit === 'g') return 1 / (Nutrition.ref(k)?.unitG || 100);
+  if (baseU === 'un' && (unit === 'xícara' || unit === 'xícaras')) return 0.25;
+  if (baseU === 'un' && (unit === 'colher (sopa)' || unit === 'colheres (sopa)')) return 0.1;
+  return UNIT_MULT[unit] || 1;
+};
 // Passo do − / + na unidade base, proporcional ao tamanho da quantidade
 const qtyStep = (base, u) => u === 'un' ? 1 : base < 100 ? 10 : base < 1000 ? 50 : 100;
 const fmtInput = (v, unit) => {
+  if (unit === 'xícara' || unit === 'xícaras' || unit === 'colher (sopa)' || unit === 'colher (chá)') {
+    const val = Math.round(v * 4) / 4;
+    return String(val).replace('.', ',');
+  }
   const r = unit === 'g' || unit === 'ml' ? Math.round(v) : unit === 'un' ? Math.round(v * 2) / 2 : Math.round(v * 100) / 100;
   return String(r).replace('.', ',');
 };
@@ -191,9 +214,25 @@ function renderRecipeModal() {
             <button class="ing-toggle ${x.inc ? 'is-in' : ''}" data-ing="${esc(x.k)}" aria-pressed="${x.inc}" aria-label="${x.inc ? 'Tirar' : 'Incluir'} ${esc(pretty(x.k).toLowerCase())}" title="${x.inc ? 'Não tenho — tirar da receita' : 'Comprei / tenho — incluir na receita'}">${x.inc ? '−' : '+'}</button>
           </li>`).join('')}</ul>
         <div>
-          <h4 class="filter-label mb-3">Modo de preparo</h4>
-          ${steps.length ? `<ol class="space-y-3 text-sm text-[var(--ink-2)]" aria-live="polite">${steps.map((s, i) => `<li class="flex gap-3 step-in"><span class="w-6 h-6 rounded-full bg-[var(--green)] text-white text-xs font-bold flex items-center justify-center flex-shrink-0">${i + 1}</span><span class="pt-0.5">${esc(s)}</span></li>`).join('')}</ol>`
-            : '<p class="text-sm text-[var(--ink-3)]">Inclua ingredientes para ver o modo de preparo.</p>'}
+          <div class="modern-prep-header">
+            <svg class="prep-timer-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="14" r="8"/><path d="M12 10v4l2.5 2.5"/><path d="M10 2h4"/><path d="m19 5 1.5 1.5"/></svg>
+            <span class="prep-timer-label">Modo de preparo :</span>
+            <span class="prep-timer-val">${r.time ? r.time + 'min' : '20min'}</span>
+          </div>
+          ${steps.length ? `
+            <ol class="modern-step-list" aria-live="polite">
+              ${steps.map((s, i) => `
+                <li class="modern-step-item">
+                  <span class="modern-step-num">${i + 1}</span>
+                  <span class="modern-step-text">${esc(s)}</span>
+                </li>
+              `).join('')}
+            </ol>
+            <button class="modern-action-btn" onclick="toast('Avaliação registrada com sucesso! ⭐');">
+              <svg class="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+              Avalie essa receita
+            </button>
+          ` : '<p class="text-sm text-[var(--ink-3)] text-center py-6">Inclua ingredientes para ver o modo de preparo.</p>'}
         </div>
       </div>
       <div class="flex flex-col sm:flex-row gap-2 mt-7">
@@ -242,7 +281,12 @@ function favButtonHTML() {
 }
 
 function openRecipe(id) {
-  const r = byId(id); if (!r) return;
+  let r = byId(id);
+  if (!r) {
+    const fav = Favs.get(id);
+    if (fav && fav.recipeSnapshot) r = fav.recipeSnapshot;
+  }
+  if (!r) return;
   Reco.trackView(r);
   modalRecipe = r; modalServes = initialServes(r); modalAdj = {}; modalUnit = {};
   modalOwned = new Set(r.ingredients.filter(k => ingredientStatus(r, k, 1).cls !== 'miss'));
@@ -255,21 +299,88 @@ function openRecipe(id) {
   openModal($('#recipe-modal'));
 }
 
+function parseChefIngredientText(raw) {
+  let text = String(raw || '').trim();
+  // Padrões como:
+  // "347 g de peito de frango" ou "1/2 xícara de queijo" ou "2 colheres (de sopa) de azeite"
+  // "1 unidade de 347 gramas de peito de frango" -> simplifica para "347 g de peito de frango"
+  text = text.replace(/^1\s+(?:unidade|un)\s+de\s+(\d+(?:[.,]\d+)?\s*(?:g|gramas?|kg|ml|l))\b/i, '$1');
+  
+  let match = text.match(/^([\d\/\s.,]+)\s*(kg|g|gramas?|l|ml|xícaras?|xicara|xicaras|colheres?\s*(?:\(\s*de\s+sopa\s*\)|de\s+sopa|\(sopa\))|colheres?\s*(?:\(\s*de\s+chá\s*\)|de\s+chá|\(chá\))|pitadas?|latas?|pacotes?|unidades?|un)?\s*(?:de\s+)?(.+)$/i);
+  
+  if (match) {
+    let qStr = match[1].trim();
+    let uStr = (match[2] || '').trim().toLowerCase();
+    let name = match[3].trim();
+    
+    // Converte fração como 1/2 para número
+    let q = 1;
+    if (qStr.includes('/')) {
+      let parts = qStr.split(/\s+/);
+      if (parts.length === 2) {
+        let [num, den] = parts[1].split('/');
+        q = parseFloat(parts[0]) + (parseFloat(num) / parseFloat(den));
+      } else {
+        let [num, den] = qStr.split('/');
+        q = parseFloat(num) / parseFloat(den);
+      }
+    } else {
+      q = parseFloat(qStr.replace(',', '.')) || 1;
+    }
+    
+    let baseUnit = 'un';
+    let displayUnit = 'un';
+    let baseQty = q;
+    
+    if (/^k?g|grama/.test(uStr)) {
+      baseUnit = 'g';
+      baseQty = uStr.startsWith('k') ? q * 1000 : q;
+      displayUnit = uStr.startsWith('k') ? 'kg' : 'g';
+    } else if (/^m?l|litro/.test(uStr)) {
+      baseUnit = 'ml';
+      baseQty = uStr === 'l' || uStr === 'litro' || uStr === 'litros' ? q * 1000 : q;
+      displayUnit = baseQty >= 1000 ? 'L' : 'ml';
+    } else if (/x[íi]cara/.test(uStr)) {
+      baseUnit = 'g';
+      baseQty = q * 240;
+      displayUnit = 'xícara';
+    } else if (/sopa/.test(uStr)) {
+      baseUnit = 'g';
+      baseQty = q * 15;
+      displayUnit = 'colher (sopa)';
+    } else if (/ch[áa]/.test(uStr)) {
+      baseUnit = 'g';
+      baseQty = q * 5;
+      displayUnit = 'colher (chá)';
+    } else {
+      baseUnit = 'un';
+      baseQty = q;
+      displayUnit = 'un';
+    }
+    
+    return { name, baseQty, baseUnit, displayUnit, rawText: text };
+  }
+  
+  return { name: text, baseQty: 1, baseUnit: 'un', displayUnit: 'un', rawText: text };
+}
+
 // Receita selecionada no chat local. O backend fornece somente dados da
 // FatSecret; esta adaptação reutiliza o mesmo modal do catálogo principal.
 function openChefRecipe(data) {
   if (!data || !data.recipe_id || !Array.isArray(data.ingredientes)) return;
   const used = new Set();
-  const items = data.ingredientes.map((text, index) => {
-    const raw = String(text || '').trim();
-    const words = norm(raw).split(/[^a-z0-9áéíóúãõç-]+/).filter(Boolean);
+  const parsedItems = data.ingredientes.map(text => parseChefIngredientText(text));
+  
+  const items = parsedItems.map((item, index) => {
+    const raw = item.name;
     const known = Object.keys(INGREDIENTS).sort((a, b) => b.length - a.length)
       .find(k => raw.toLocaleLowerCase('pt-BR').includes(k.replace(/-/g, ' ')));
     let key = known || norm(raw).slice(0, 80) || `ingrediente-${index + 1}`;
     if (used.has(key)) key = `${key}-${index + 1}`;
     used.add(key);
-    return { key, label: raw };
+    return { key, label: raw, item };
   });
+
   const recipe = {
     id: `fatsecret-${data.recipe_id}`,
     title: data.titulo || 'Receita FatSecret',
@@ -279,7 +390,7 @@ function openChefRecipe(data) {
     macros: { p: Number(data.nutricao?.protein) || 0, c: Number(data.nutricao?.carbohydrate) || 0, g: Number(data.nutricao?.fat) || 0 },
     rating: 0, reviews: 0, style: [], serves: Number(data.porcoes) || 1,
     yield: [Number(data.porcoes) || 1, 'un'],
-    amounts: Object.fromEntries(items.map(({ key }) => [key, [1, 'un']])),
+    amounts: Object.fromEntries(items.map(({ key, item }) => [key, [item.baseQty, item.baseUnit]])),
     ingredients: items.map(x => x.key),
     steps: Array.isArray(data.passo_a_passo) ? data.passo_a_passo : [],
     source: data.fonte || 'FatSecret', sourceUrl: data.url_fonte || '',
@@ -291,9 +402,10 @@ function openChefRecipe(data) {
     },
     ingredientLabels: Object.fromEntries(items.map(x => [x.key, x.label]))
   };
-  // O modal usa `pretty`; preservamos os nomes completos vindos da API.
+  // O modal usa `pretty`; preservamos os nomes legíveis dos ingredientes.
   window.__chefPrettyOverride = Object.fromEntries(items.map(x => [x.key, x.label]));
-  modalRecipe = recipe; modalServes = recipe.serves; modalAdj = {}; modalUnit = {};
+  modalRecipe = recipe; modalServes = recipe.serves; modalAdj = {};
+  modalUnit = Object.fromEntries(items.map(x => [x.key, x.item.displayUnit]));
   modalOwned = new Set(recipe.ingredients); modalInc = new Set(recipe.ingredients);
   renderRecipeModal(); openModal($('#recipe-modal'));
 }
@@ -397,7 +509,7 @@ $('#recipe-modal').addEventListener('click', e => {
     const id = modalRecipe.id, cfg = currentConfig(), act = fav.dataset.favAction;
     const config = isOriginal(modalRecipe, cfg) && !Object.keys(cfg.units).length ? null : cfg; // original = sem config
     if (act === 'remove') { Favs.remove(id); toast('Removida dos favoritos'); }
-    else { Favs.put(id, config); toast(act === 'update' ? '↻ Favorito atualizado com suas alterações' : config ? '❤️ Salva com suas alterações' : '❤️ Salva nos favoritos'); }
+    else { Favs.put(id, config, modalRecipe); toast(act === 'update' ? '↻ Favorito atualizado com suas alterações' : config ? '❤️ Salva com suas alterações' : '❤️ Salva nos favoritos'); }
     renderRecipeModal(); $('#recipe-modal #modal-fav-btn')?.focus();
     renderResults(); renderReco();
     if ($('#favs-modal').classList.contains('open')) renderFavs();
@@ -458,7 +570,7 @@ $('#recipe-modal').addEventListener('click', e => { if (e.target.closest('#cook-
 
 // ---- Favoritos ----
 function renderFavs() {
-  const list = Favs.all().map(f => ({ f, r: byId(f.recipeId) })).filter(x => x.r);
+  const list = Favs.all().map(f => ({ f, r: byId(f.recipeId) || f.recipeSnapshot })).filter(x => x.r);
   $('#favs-list').innerHTML = list.length
     ? list.map(({ f, r }) => cardHTML(r, { compact: true, note: f.config ? `✎ ${configSummary(r, f.config) || 'Versão personalizada'}` : '' })).join('')
     : `<div class="col-span-full text-center py-12"><div class="text-4xl mb-3">🤍</div><p class="font-bold">Nenhuma receita salva ainda</p><p class="text-sm text-[var(--ink-3)] mt-1">Toque no coração de uma receita para guardá-la aqui.</p></div>`;

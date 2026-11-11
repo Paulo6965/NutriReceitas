@@ -191,9 +191,71 @@ const chefSessionId = () => {
   return id;
 };
 const chefMarkdown = (value) => {
-  // A resposta da IA é texto; escapamos antes de aplicar somente uma pequena
-  // formatação permitida. Nunca inserimos HTML arbitrário vindo do backend.
-  let html = esc(String(value || ''));
+  let text = String(value || '');
+  
+  // Se for uma lista de opções de receitas (ex: "Encontrei estas opções de receitas:")
+  if (/Encontrei estas opç/i.test(text) && /\d+\.\s+/i.test(text)) {
+    let lines = text.split('\n');
+    let intro = [];
+    let outro = [];
+    let currentCard = null;
+    let cards = [];
+    
+    for (let line of lines) {
+      let trimmed = line.trim();
+      let matchNum = trimmed.match(/^(\d+)\.\s+(.+)$/);
+      if (matchNum) {
+        if (currentCard) cards.push(currentCard);
+        currentCard = { num: matchNum[1], title: matchNum[2], ingredients: '', stats: [] };
+      } else if (currentCard) {
+        if (/^Alguns ingredientes:\s*/i.test(trimmed)) {
+          currentCard.ingredients = trimmed.replace(/^Alguns ingredientes:\s*/i, '');
+        } else if (/^(Aproveitamento|Disponíveis usados|Ainda faltam):\s*/i.test(trimmed)) {
+          currentCard.stats.push(trimmed);
+        } else if (trimmed.length > 0 && !cards.length) {
+          currentCard.stats.push(trimmed);
+        } else if (trimmed.length > 0) {
+          outro.push(trimmed);
+        }
+      } else {
+        if (trimmed) intro.push(trimmed);
+      }
+    }
+    if (currentCard) cards.push(currentCard);
+    
+    if (cards.length > 0) {
+      let cardsHtml = cards.map(c => `
+        <div class="recipe-chat-card">
+          <div class="recipe-chat-header">
+            <span class="recipe-chat-title">${esc(c.num)}. ${esc(c.title)}</span>
+            <span class="recipe-chat-badge">Opção ${esc(c.num)}</span>
+          </div>
+          <div class="recipe-chat-body">
+            ${c.ingredients ? `
+              <div class="recipe-chat-section-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/></svg>
+                Ingredientes destacados
+              </div>
+              <ul class="recipe-chat-list">
+                ${c.ingredients.split(',').map(i => `<li class="recipe-chat-item"><span class="bullet">•</span><span>${esc(i.trim())}</span></li>`).join('')}
+              </ul>
+            ` : ''}
+            ${c.stats.length ? `
+              <div class="pt-1.5 border-t border-[var(--line)] text-xs text-[var(--ink-3)] space-y-0.5">
+                ${c.stats.map(s => `<div>${esc(s)}</div>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      `).join('');
+      
+      let outroHtml = outro.length ? `<div class="mt-2 text-sm font-semibold text-[var(--ink-2)]">${esc(outro.join(' '))}</div>` : '';
+      return `<p class="mb-2 font-medium">${esc(intro.join(' '))}</p>${cardsHtml}${outroHtml}`;
+    }
+  }
+
+  // A resposta da IA é texto comum; escapamos antes de aplicar a formatação
+  let html = esc(text);
   html = html.replace(/^### (.+)$/gm, '<b>$1</b>')
     .replace(/^## (.+)$/gm, '<strong>$1</strong>')
     .replace(/^[-*] (.+)$/gm, '• $1')
@@ -202,6 +264,11 @@ const chefMarkdown = (value) => {
   return html;
 };
 async function handleChat(text) {
+  if (!state.user) {
+    toast('Faça login ou crie sua conta para conversar com o NutriChef!');
+    openAuth();
+    return;
+  }
   pushMsg(esc(text), 'user');
   const typing = pushMsg('<span class="typing"><span></span><span></span><span></span></span>');
   const stock = (typeof Stock !== 'undefined' ? Stock.all() : []).map(item => ({

@@ -67,15 +67,21 @@ const Favs = {
   has(id) { return this.all().some(f => f.recipeId === id); },
   get(id) { return this.all().find(f => f.recipeId === id) || null; },
   // Salva (ou atualiza) com a configuração atual da receita
-  put(id, config = null) {
+  put(id, config = null, recipeSnapshot = null) {
     const list = this.all(), i = list.findIndex(f => f.recipeId === id);
-    const entry = { recipeId: id, config, savedAt: new Date().toISOString() };
-    if (i >= 0) list[i] = entry; else { list.push(entry); Reco.trackFav(byId(id)); }
+    const existing = i >= 0 ? list[i] : null;
+    const snapshot = recipeSnapshot || (existing ? existing.recipeSnapshot : null) || byId(id);
+    const entry = { recipeId: id, config, savedAt: new Date().toISOString(), recipeSnapshot: snapshot };
+    if (i >= 0) list[i] = entry; else { list.push(entry); if (snapshot) Reco.trackFav(snapshot); }
     this.save(list);
   },
   remove(id) { this.save(this.all().filter(f => f.recipeId !== id)); },
   // Coração dos cards: alterna salvando a receita original
-  toggle(id) { if (this.has(id)) { this.remove(id); return false; } this.put(id, null); return true; },
+  toggle(id, recipeSnapshot = null) {
+    if (this.has(id)) { this.remove(id); return false; }
+    this.put(id, null, recipeSnapshot);
+    return true;
+  },
 };
 
 /* ---------- Sessão de busca e conversa ----------
@@ -165,3 +171,4 @@ const Stock = {
 };
 const KIND_LABEL = { solid: ['Sólido', 'kind-solid'], liquid: ['Líquido', 'kind-liquid'], unit: ['Unidade', 'kind-unit'] };
 const stockEmoji = (i) => { const k = canonical(i.name) || canonical(i.name.split(' ')[0]); return k ? emojiFor(k) : '🧺'; };
+
