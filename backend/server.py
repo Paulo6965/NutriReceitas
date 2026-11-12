@@ -19,7 +19,7 @@ BACKEND = Path(__file__).resolve().parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from customchef import ChefApp, Settings  # noqa: E402
+from customchef import ChefApp, LLMService, Settings  # noqa: E402
 
 LOGGER = logging.getLogger("nutrireceitas.server")
 SESSIONS: dict[str, ChefApp] = {}
@@ -79,7 +79,20 @@ class Handler(SimpleHTTPRequestHandler):
             self._deny_private()
             return
         if urlparse(self.path).path == "/api/health":
-            self._json(200, {"ok": True, "service": "local-chef"})
+            # Diagnóstico sem expor nenhuma chave: só diz o que está configurado.
+            info = {"ok": True, "service": "local-chef"}
+            try:
+                settings = Settings.from_env()
+                info["ia"] = settings.llm_provider
+                info["modelo"] = (
+                    LLMService.active_gemini_model(settings) if settings.llm_provider == "gemini" else settings.model
+                )
+                info["fatsecret_configurado"] = True
+                info["gemini_configurado"] = bool(settings.gemini_api_key)
+            except Exception as exc:  # .env incompleto
+                info["ok"] = False
+                info["erro_config"] = str(exc)
+            self._json(200, info)
             return
         super().do_GET()
 

@@ -27,6 +27,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+import urllib3.util.connection as _urllib3_connection
+
+# Servidores na nuvem (ex.: VM da Azure) às vezes tentam IPv6 primeiro sem ter
+# rota IPv6: cada chamada ao Gemini/FatSecret fica parada até o tempo limite
+# antes de cair para IPv4, e o chat passa de 60 s. Usar só IPv4 evita isso.
+_urllib3_connection.HAS_IPV6 = False
 from dotenv import load_dotenv
 
 
@@ -44,7 +50,7 @@ class Settings:
     fatsecret_client_secret: str
     token_url: str = "https://oauth.fatsecret.com/connect/token"
     api_base_url: str = "https://platform.fatsecret.com/rest"
-    request_timeout: tuple[int, int] = (10, 30)
+    request_timeout: tuple[int, int] = (5, 15)  # (conectar, ler) da FatSecret
     max_tool_rounds: int = 5
     max_recipe_options: int = 3
     # "gemini" (nuvem, plano gratuito) ou "ollama" (modelo rodando no PC).
@@ -516,9 +522,37 @@ class LLMService:
             content = self._ollama(system, user, max_tokens)
         return parse_json_object(content)
 
+    # Modelo rápido usado se o configurado travar ou falhar. Vale para o
+    # processo inteiro: depois da 1ª troca, as próximas mensagens já usam ele.
+    FALLBACK_MODEL = "gemini-flash-lite-latest"
+    _model_override: str | None = None
+    # (conectar, ler) em segundos. Tem que caber nos ~60 s do proxy do site,
+    # somando a interpretação, a FatSecret e a tradução.
+    GEMINI_TIMEOUT = (5, 20)
+
+    @classmethod
+    def active_gemini_model(cls, settings: "Settings") -> str:
+        return cls._model_override or settings.gemini_model
+
     def _gemini(self, system: str, user: str, max_tokens: int, _retry: bool = False) -> str:
-        response = self.http.post(
-            self.GEMINI_URL.format(model=self.settings.gemini_model),
+        model = self.active_gemini_model(self.settings)
+        try:
+            response = self._gemini_post(model, system, user, max_tokens)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if model != self.FALLBACK_MODEL:
+                LOGGER.warning("Gemini %s não respondeu (%s); trocando para %s", model, exc, self.FALLBACK_MODEL)
+                LLMService._model_override = self.FALLBACK_MODEL
+                return self._gemini(system, user, max_tokens, _retry)
+            raise RuntimeError(f"Gemini não respondeu a tempo: {exc}") from exc
+        if (response.status_code == 404 or response.status_code >= 500) and model != self.FALLBACK_MODEL:
+            LOGGER.warning("Gemini %s respondeu HTTP %s; trocando para %s", model, response.status_code, self.FALLBACK_MODEL)
+            LLMService._model_override = self.FALLBACK_MODEL
+            return self._gemini(system, user, max_tokens, _retry)
+        return self._gemini_read(response, system, user, max_tokens, _retry)
+
+    def _gemini_post(self, model: str, system: str, user: str, max_tokens: int) -> requests.Response:
+        return self.http.post(
+            self.GEMINI_URL.format(model=model),
             headers={"x-goog-api-key": self.settings.gemini_api_key},
             json={
                 "systemInstruction": {"parts": [{"text": system}]},
@@ -531,8 +565,10 @@ class LLMService:
                     "maxOutputTokens": max_tokens + 4096,
                 },
             },
-            timeout=self.settings.request_timeout,
+            timeout=self.GEMINI_TIMEOUT,
         )
+
+    def _gemini_read(self, response: requests.Response, system: str, user: str, max_tokens: int, _retry: bool) -> str:
         if response.status_code == 429 and not _retry:
             # Plano gratuito: limite de pedidos por minuto. Espera um pouco
             # e tenta mais uma vez antes de cair no dicionário local.

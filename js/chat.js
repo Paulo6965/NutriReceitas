@@ -318,7 +318,7 @@ async function handleChat(text) {
     saveChat();
   } catch (error) {
     console.error('NutriChef local indisponível:', error);
-    typing.innerHTML = '<b>Não consegui conectar ao NutriChef local.</b><br>Abra o site pelo <i>iniciar-site-local</i> e confirme se o Ollama está em execução.';
+    typing.innerHTML = '<b>O NutriChef não respondeu agora.</b><br>Tente de novo em alguns segundos. Se continuar, avise quem cuida do servidor (o NutriChef precisa do backend Python rodando com o .env configurado).';
     saveChat();
   }
 }
