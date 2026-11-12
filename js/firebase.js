@@ -20,10 +20,11 @@ import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
   deleteDoc,
   collection,
   getDocs,
-}                                               from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+}                                             from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // ── Configuração do projeto nadispensa ──────────────────────────────────────
 const firebaseConfig = {
@@ -137,6 +138,65 @@ window.firebaseDB = {
       } catch {}
     }
     console.log(`[Firebase] ${keys.length} chaves migradas do guest para o usuário.`);
+  },
+};
+
+// ── Perfis e Área do Administrador ─────────────────────────────────────────
+// Cada pessoa tem um documento /users/{uid} com nome, e-mail, papel e status:
+//   { name, email, role: 'user' | 'admin', disabled: bool, createdAt, lastLoginAt }
+// O papel NÃO pode ser alterado pelo próprio usuário: as regras do Firestore
+// (firestore.rules) só deixam um admin mudar `role` e `disabled`.
+// O primeiro admin é definido à mão no Console do Firebase (role = "admin").
+
+const KV_TYPE = (docId) => docId.split(':').pop(); // "nr:<uid>:favs" → "favs"
+
+window.firebaseAdmin = {
+  // Cria o perfil no primeiro login; nos próximos, só atualiza o último acesso.
+  async ensureProfile(fbUser, name) {
+    const ref  = doc(firestore, "users", fbUser.uid);
+    const snap = await getDoc(ref);
+    const now  = new Date().toISOString();
+    if (!snap.exists()) {
+      const profile = {
+        name:        name || fbUser.displayName || fbUser.email.split('@')[0],
+        email:       fbUser.email,
+        role:        'user',
+        disabled:    false,
+        createdAt:   now,
+        lastLoginAt: now,
+      };
+      await setDoc(ref, profile);
+      return profile;
+    }
+    const changes = { lastLoginAt: now, email: fbUser.email };
+    if (!snap.data().name && name) changes.name = name;
+    await updateDoc(ref, changes);
+    return { ...snap.data(), ...changes };
+  },
+
+  // ---- Funções abaixo só funcionam para admin (as regras bloqueiam os demais) ----
+
+  async listUsers() {
+    const snap = await getDocs(collection(firestore, "users"));
+    return snap.docs.map(d => ({ uid: d.id, ...d.data() }));
+  },
+
+  // Lê os dados salvos de um usuário: { favs: [...], stock: [...], cooked: [...], ... }
+  async getUserData(uid) {
+    const snap = await getDocs(collection(firestore, "users", uid, "kv"));
+    const data = {};
+    snap.forEach(d => { data[KV_TYPE(d.id)] = d.data().value; });
+    return data;
+  },
+
+  setRole(uid, role)         { return updateDoc(doc(firestore, "users", uid), { role }); },
+  setDisabled(uid, disabled) { return updateDoc(doc(firestore, "users", uid), { disabled }); },
+
+  // Apaga favoritos, estoque, histórico etc. do usuário (a conta de login continua existindo).
+  async clearUserData(uid) {
+    const snap = await getDocs(collection(firestore, "users", uid, "kv"));
+    await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+    return snap.size;
   },
 };
 

@@ -160,13 +160,19 @@ function renderRecipeModal() {
   const shortNote = short.length ? `<p class="mt-2 text-sm text-[var(--ink-2)]"><span class="nudge">Pouca quantidade:</span> ${esc(joinPt(short.map(x => pretty(x.k).toLowerCase())))}.</p>` : '';
   const nLine = (n) => n ? `<span class="ing-nut"><b>${approx}${fmtN(n.kcal)} kcal</b><span>P ${fmtN(n.p)} g</span><span>C ${fmtN(n.c)} g</span><span>G ${fmtN(n.g)} g</span></span>` : '<span class="ing-nut"><span>sem dados nutricionais</span></span>';
 
-  $('#recipe-modal-body').innerHTML = `
+  // Receita sem foto (algumas da FatSecret): sem área de imagem, só os dados.
+  const header = r.img ? `
     <div class="relative aspect-[16/9] bg-[var(--brown-50)]">
       <img src="${r.img}" alt="" class="w-full h-full object-cover" onerror="this.remove()">
       <div class="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent"></div>
       <button class="icon-btn absolute top-3 right-3 !bg-[var(--surface-glass)] shadow" data-close aria-label="Fechar">✕</button>
       <div class="absolute bottom-4 left-4 sm:left-5 flex flex-wrap gap-2"><span class="pill">${ICON.clock}${r.time} min</span><span class="pill">${ICON.fire}${approx}${Math.round(per.kcal)} kcal/porção</span></div>
-    </div>
+    </div>` : `
+    <div class="flex items-center justify-between gap-2 px-5 sm:px-7 pt-4">
+      <div class="flex flex-wrap gap-2"><span class="pill">${ICON.clock}${r.time} min</span><span class="pill">${ICON.fire}${approx}${Math.round(per.kcal)} kcal/porção</span></div>
+      <button class="icon-btn" data-close aria-label="Fechar">✕</button>
+    </div>`;
+  $('#recipe-modal-body').innerHTML = `${header}
     <div class="p-5 sm:p-7">
       <div class="flex items-center justify-between gap-3 flex-wrap"><span class="cat">${catLabel(r)}</span><span class="meta"><span class="rating">${ICON.star}${fmtRating(r.rating)} <span class="font-normal text-[var(--ink-3)]">(${r.reviews} avaliações)</span></span></span></div>
       <h3 id="recipe-title" class="font-display text-2xl sm:text-[30px] font-semibold mt-2 leading-tight">${esc(r.title)}</h3>
@@ -381,11 +387,15 @@ function openChefRecipe(data) {
     return { key, label: raw, item };
   });
 
+  // Foto da FatSecret quando existe (só https e sem aspas, porque a URL
+  // entra direto no src do modal). Sem foto, o modal abre sem imagem.
+  const img = typeof data.imagem === 'string' && /^https:\/\/[^\s"'<>]+$/.test(data.imagem) ? data.imagem : '';
+
   const recipe = {
     id: `fatsecret-${data.recipe_id}`,
     title: data.titulo || 'Receita FatSecret',
     desc: 'Receita selecionada no chat e disponibilizada pela FatSecret.',
-    img: '', kind: 'comida', taste: 'salgado', temp: 'quente', time: Number(data.tempo_preparo_minutos) || 0,
+    img, kind: 'comida', taste: 'salgado', temp: 'quente', time: Number(data.tempo_preparo_minutos) || 0,
     kcal: Number(data.nutricao?.calories) || 0, kcalExact: Number(data.nutricao?.calories) || null,
     macros: { p: Number(data.nutricao?.protein) || 0, c: Number(data.nutricao?.carbohydrate) || 0, g: Number(data.nutricao?.fat) || 0 },
     rating: 0, reviews: 0, style: [], serves: Number(data.porcoes) || 1,

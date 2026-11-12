@@ -119,16 +119,21 @@ class Handler(SimpleHTTPRequestHandler):
             # modal. Limpa o marcador antes de cada mensagem para não reabrir
             # a receita em mensagens posteriores.
             app.state.selected_recipe = None
+            app.state.options_payload = None
             result = app.handle(message)
             response = {"ok": True, "reply": result}
             if app.state.selected_recipe:
                 response["recipe"] = app.state.selected_recipe
+            # Lista de opções com foto, para o site montar os cards.
+            if app.state.options_payload:
+                response["options"] = app.state.options_payload
+                response["hasMore"] = app.state.has_more
             self._json(200, response)
         except json.JSONDecodeError:
             self._json(400, {"error": "invalid_json"})
         except Exception:
             LOGGER.exception("Falha ao processar /api/chef")
-            self._json(500, {"error": "chef_unavailable", "reply": "Não consegui falar com o NutriChef local. Verifique o Ollama, as dependências e as credenciais."})
+            self._json(500, {"error": "chef_unavailable", "reply": "Não consegui falar com o NutriChef. Verifique o .env (FatSecret e GEMINI_API_KEY), o Ollama (se estiver usando) e o terminal do servidor."})
 
 
 def main():

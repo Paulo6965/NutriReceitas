@@ -1,3 +1,11 @@
 .env
 __pycache__/
 *.pyc
+
+# Cópias locais (não vão para o GitHub)
+backup/
+NaDispensa-github/
+
+# Firebase CLI
+.firebase/
+firebase-debug.log

@@ -14,14 +14,40 @@ $('#auth-tabs').addEventListener('click', e => {
 });
 
 // ── Helpers internos ────────────────────────────────────────────────────────
+// O papel salvo no navegador não é confiável (dá para editar no DevTools):
+// começa sempre como 'user' e só vira 'admin' depois de conferir no Firestore.
+if (state.user) state.user.role = 'user';
+
 function _applySession(fbUser, displayName) {
   state.user = {
     name:  fbUser.displayName || displayName || fbUser.email.split('@')[0],
     email: fbUser.email,
     uid:   fbUser.uid,
-    role:  'user', // padrão; admin pode ser definido via Firestore custom claim futuramente
+    role:  'user',
   };
   db.set('nr:session', state.user);
+  syncProfile(fbUser, displayName);
+}
+
+// Cria/atualiza o perfil em /users/{uid} e lê o papel (user | admin).
+async function syncProfile(fbUser, displayName) {
+  if (!window.firebaseAdmin || !state.user) return;
+  try {
+    const profile = await firebaseAdmin.ensureProfile(fbUser, displayName || state.user.name);
+    if (profile.disabled) {
+      await signOut();
+      toast('Sua conta foi desativada pelo administrador.');
+      return;
+    }
+    const role = profile.role === 'admin' ? 'admin' : 'user';
+    if (state.user && state.user.role !== role) {
+      state.user.role = role;
+      db.set('nr:session', state.user);
+      renderAuthSlot();
+    }
+  } catch (e) {
+    console.warn('[Firebase] Não foi possível ler o perfil:', e.message);
+  }
 }
 
 function _resetBtn() {
@@ -35,22 +61,28 @@ async function signInWithEmail(email, password, name) {
   try {
     const cred = await firebaseAuth.signIn(email, password);
     _applySession(cred.user, name);
+    _resetBtn();
     closeModal($('#auth-modal'));
     afterAuthChange();
     toast(`Bem-vindo(a), ${state.user.name.split(' ')[0]}!`);
   } catch (e) {
-    // Se o usuário não existe, cria a conta automaticamente
-    if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential') {
-      await signUpWithEmail(email, password, name);
-    } else {
-      _resetBtn();
-      const msgs = {
-        'auth/wrong-password':    'Senha incorreta.',
-        'auth/invalid-email':     'E-mail inválido.',
-        'auth/too-many-requests': 'Muitas tentativas. Tente mais tarde.',
-      };
-      toast(msgs[e.code] || 'Erro: ' + e.message);
-    }
+    // "Entrar" nunca cria conta: antes, um e-mail não cadastrado virava
+    // conta nova automaticamente, então qualquer e-mail/senha "entrava".
+    // O Firebase devolve o mesmo erro para e-mail inexistente e senha
+    // errada (para não revelar quem tem conta), por isso a mensagem é única.
+    _resetBtn();
+    const wrong = 'E-mail ou senha incorretos. Se você ainda não tem conta, use a aba "Criar conta".';
+    const msgs = {
+      'auth/invalid-credential':     wrong,
+      'auth/user-not-found':         wrong,
+      'auth/wrong-password':         wrong,
+      'auth/invalid-login-credentials': wrong,
+      'auth/invalid-email':          'E-mail inválido.',
+      'auth/missing-password':       'Digite a senha.',
+      'auth/user-disabled':          'Esta conta foi desativada.',
+      'auth/too-many-requests':      'Muitas tentativas. Tente de novo em alguns minutos.',
+    };
+    toast(msgs[e.code] || 'Não foi possível entrar: ' + e.message);
   }
 }
 
@@ -61,6 +93,7 @@ async function signUpWithEmail(email, password, name) {
     // Salva o nome de exibição no Firebase Auth
     await firebaseAuth.updateProfile(cred.user, { displayName: name });
     _applySession(cred.user, name);
+    _resetBtn();
     closeModal($('#auth-modal'));
     afterAuthChange();
     toast(`Conta criada! Bem-vindo(a), ${state.user.name.split(' ')[0]}!`);
@@ -80,6 +113,7 @@ $('#google-btn').addEventListener('click', async () => {
   try {
     const result = await firebaseAuth.signInWithGoogle();
     _applySession(result.user, result.user.displayName);
+    _resetBtn();
     closeModal($('#auth-modal'));
     afterAuthChange();
     toast(`Bem-vindo(a), ${state.user.name.split(' ')[0]}!`);
@@ -131,7 +165,15 @@ async function signOut() {
 }
 
 // ── Abre o modal de login ───────────────────────────────────────────────────
-const openAuth = () => { openModal($('#auth-modal')); AuthArt.start(authTab); };
+// O botão fica "Aguarde…" durante o login e, num login que dá certo, o modal
+// fecha antes de voltar ao normal. Por isso ele é sempre destravado ao abrir
+// o modal (antes só voltava ao normal recarregando a página).
+const openAuth = () => {
+  _resetBtn();
+  $('#auth-pass').value = '';
+  openModal($('#auth-modal'));
+  AuthArt.start(authTab);
+};
 
 // ── Listener global do Firebase Auth (detecta sessão salva ao recarregar) ───
 window.addEventListener('firebase:authchange', async (e) => {
@@ -140,6 +182,9 @@ window.addEventListener('firebase:authchange', async (e) => {
     // Recarregamento de página com sessão ativa no Firebase
     _applySession(fbUser, fbUser.displayName);
     afterAuthChange();
+  } else if (fbUser && state.user) {
+    // Sessão restaurada do navegador: confere o papel no Firestore
+    syncProfile(fbUser, fbUser.displayName);
   } else if (!fbUser && state.user) {
     // Sessão expirou no Firebase
     state.user = null;
@@ -271,8 +316,13 @@ function renderAuthSlot() {
     return;
   }
   const initials = state.user.name.split(' ').map(p => p[0]).slice(0, 2).join('').toUpperCase();
+  // Admin: botão fixo no topo do site (além do item no menu do usuário).
+  const adminBtn = state.user.role === 'admin'
+    ? `<button class="btn btn-primary btn-sm !h-9 !px-3 mr-1" id="admin-top-btn" title="Painel do administrador">⚙<span class="hidden sm:inline"> Admin</span></button>`
+    : '';
   slot.innerHTML = `
-    <div class="relative">
+    <div class="relative flex items-center">
+      ${adminBtn}
       <button class="nav-link !pl-1.5" id="user-btn" aria-haspopup="menu">
         <span class="w-8 h-8 rounded-full bg-[var(--brown)] text-white flex items-center justify-center text-xs font-bold">${esc(initials)}</span>
         <span class="hidden sm:inline max-w-[120px] truncate">${esc(state.user.name)}</span>
@@ -285,6 +335,7 @@ function renderAuthSlot() {
         <button class="menu-item" id="um-favs">♡ Meus favoritos</button>
         <button class="menu-item" id="um-stock">▢ Meu estoque</button>
         <button class="menu-item" id="um-reset">↺ Reiniciar recomendações</button>
+        ${state.user.role === 'admin' ? '<button class="menu-item" id="um-admin">⚙ Painel do administrador</button>' : ''}
         <div class="h-px bg-[var(--line)] my-1"></div>
         <button class="menu-item !text-[var(--danger)]" id="um-logout">Sair</button>
       </div>
@@ -296,6 +347,8 @@ function renderAuthSlot() {
   $('#um-favs').addEventListener('click', openFavs);
   $('#um-stock').addEventListener('click', openStock);
   $('#um-reset').addEventListener('click', () => { db.del(userKey('profile')); renderReco(); toast('Recomendações reiniciadas'); });
+  $('#um-admin')?.addEventListener('click', () => openAdmin());
+  $('#admin-top-btn')?.addEventListener('click', () => openAdmin());
   $('#um-logout').addEventListener('click', signOut);
 }
 

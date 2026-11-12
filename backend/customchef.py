@@ -1,15 +1,18 @@
-"""CustomChef - assistente culinário baseado em Ollama e FatSecret.
+"""CustomChef - assistente culinário baseado em FatSecret + IA (Gemini ou Ollama).
 
-Execução:
-    python main_refatorado.py
+Execução (modo terminal):
+    python backend/customchef.py
 
-Variáveis necessárias no arquivo .env:
+Variáveis do arquivo .env:
     FATSECRET_CLIENT_ID=...
     FATSECRET_CLIENT_SECRET=...
-    OLLAMA_MODEL=qwen3:4b       # opcional
+    LLM_PROVIDER=gemini         # ou "ollama"
+    GEMINI_API_KEY=...          # obrigatório com Gemini
+    GEMINI_MODEL=gemini-flash-lite-latest   # opcional
+    OLLAMA_MODEL=qwen3:4b       # opcional, só com Ollama
 
 Dependências:
-    pip install requests python-dotenv ollama
+    pip install -r backend/requirements.txt
 """
 
 from __future__ import annotations
@@ -18,13 +21,13 @@ import json
 import logging
 import os
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
 import requests
 from dotenv import load_dotenv
-from ollama import chat
 
 
 LOGGER = logging.getLogger("customchef")
@@ -44,6 +47,10 @@ class Settings:
     request_timeout: tuple[int, int] = (10, 30)
     max_tool_rounds: int = 5
     max_recipe_options: int = 3
+    # "gemini" (nuvem, plano gratuito) ou "ollama" (modelo rodando no PC).
+    llm_provider: str = "ollama"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-flash-lite-latest"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,10 +61,20 @@ class Settings:
             raise RuntimeError(
                 "Configure FATSECRET_CLIENT_ID e FATSECRET_CLIENT_SECRET no .env."
             )
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+        # Sem LLM_PROVIDER no .env: usa Gemini se houver chave, senão Ollama.
+        provider = os.getenv("LLM_PROVIDER", "").strip().lower() or ("gemini" if gemini_key else "ollama")
+        if provider not in {"gemini", "ollama"}:
+            raise RuntimeError("LLM_PROVIDER deve ser 'gemini' ou 'ollama'.")
+        if provider == "gemini" and not gemini_key:
+            raise RuntimeError("Configure GEMINI_API_KEY no .env para usar o Gemini.")
         return cls(
             model=os.getenv("OLLAMA_MODEL", "qwen3:4b"),
             fatsecret_client_id=client_id,
             fatsecret_client_secret=client_secret,
+            llm_provider=provider,
+            gemini_api_key=gemini_key,
+            gemini_model=os.getenv("GEMINI_MODEL", "").strip() or "gemini-flash-lite-latest",
         )
 
 
@@ -75,6 +92,15 @@ class ConversationState:
     available_ingredients: list[str] = field(default_factory=list)
     ingredient_mode: bool = False
     messages: list[dict[str, Any]] = field(default_factory=list)
+    # Paginação ("ver mais"): próxima candidata a detalhar (modo prato) e
+    # receitas já ranqueadas que ainda não foram mostradas (modo ingredientes).
+    next_candidate: int = 0
+    ranked_rest: list[dict[str, Any]] = field(default_factory=list)
+    # Opções estruturadas da última resposta (título, foto...) para o site
+    # montar os cards. Zerado a cada mensagem pelo servidor.
+    options_payload: list[dict[str, Any]] | None = None
+    has_more: bool = False
+    exact_match: bool = True
 
     def clear_search(self) -> None:
         self.candidates.clear()
@@ -194,12 +220,13 @@ class FatSecretClient:
             raise RuntimeError("A FatSecret retornou um formato inesperado.")
         return data
 
-    def search(self, query: str) -> str:
+    def search(self, query: str, page: int = 0) -> str:
         query = query.strip()
         if not query:
             return json_result({"erro": "Informe ingredientes ou uma receita para pesquisar."})
 
-        params = {"search_expression": query, "max_results": 20, "page_number": 0}
+        # 50 é o máximo por página da FatSecret.
+        params = {"search_expression": query, "max_results": 50, "page_number": page}
 
         def candidates_from(data: dict[str, Any]) -> list[dict[str, Any]]:
             raw = data.get("recipes", {})
@@ -212,6 +239,14 @@ class FatSecretClient:
                     "titulo": item["recipe_name"],
                     "descricao": item.get("recipe_description"),
                     "url": item.get("recipe_url"),
+                    # Nem toda receita da FatSecret tem foto.
+                    "imagem": item.get("recipe_image"),
+                    "ingredientes_busca": [
+                        str(value) for value in as_list(
+                            (item.get("recipe_ingredients") or {}).get("ingredient")
+                            if isinstance(item.get("recipe_ingredients"), dict) else None
+                        )
+                    ],
                 }
                 for item in values
                 if isinstance(item, dict) and item.get("recipe_id") and item.get("recipe_name")
@@ -258,6 +293,8 @@ class FatSecretClient:
                     LOGGER.error("FatSecret erro na busca server.api %r: %s", query, api_error)
                     return json_result({"erro": "fatsecret_api_error", "detalhes": api_error})
 
+            # Receitas com foto primeiro (a ordem entre elas é mantida).
+            candidates.sort(key=lambda item: not item.get("imagem"))
             self.state.candidates = candidates
             self.state.detailed_options = []
             self.state.selected_recipe = None
@@ -394,9 +431,17 @@ class FatSecretClient:
                 for key in ("serving_size", "calories", "protein", "carbohydrate", "fat", "fiber", "sodium")
                 if isinstance(serving, dict) and key in serving
             }
+            # Foto: o detalhe às vezes traz recipe_images; a busca às vezes
+            # traz recipe_image. Usa o que existir.
+            images_raw = raw.get("recipe_images")
+            detail_images = as_list(images_raw.get("recipe_image") if isinstance(images_raw, dict) else None)
+            candidate = next((item for item in self.state.candidates if item["recipe_id"] == recipe_id), {})
+            image = next((url for url in detail_images if isinstance(url, str) and url), None) or candidate.get("imagem")
+
             recipe = {
                 "recipe_id": str(raw.get("recipe_id", recipe_id)),
                 "titulo": raw.get("recipe_name"),
+                "imagem": image,
                 "ingredientes": ingredients,
                 "passo_a_passo": steps,
                 "fonte": "FatSecret",
@@ -416,14 +461,17 @@ class FatSecretClient:
             LOGGER.exception("Falha ao obter detalhes FatSecret")
             return json_result({"erro": "falha_na_consulta_fatsecret", "detalhes": str(exc)})
 
-    def first_complete_options(self, limit: int) -> str:
+    def first_complete_options(self, limit: int, start: int = 0) -> str:
+        """Detalha até `limit` candidatas a partir de `start` (para o "ver mais")."""
         options: list[dict[str, Any]] = []
-        for candidate in self.state.candidates:
-            if len(options) >= limit:
-                break
+        index = start
+        while index < len(self.state.candidates) and len(options) < limit:
+            candidate = self.state.candidates[index]
+            index += 1
             result = parse_json_object(self.details(candidate["recipe_id"], store_last=False))
             if result.get("titulo") and result.get("ingredientes") and not result.get("erro"):
                 options.append(result)
+        self.state.next_candidate = index
         self.state.detailed_options = options
         if not options:
             return json_result({"erro": "detalhes_nao_encontrados"})
@@ -435,33 +483,106 @@ class FatSecretClient:
 # ---------------------------------------------------------------------------
 
 class LLMService:
-    TRANSLATION_MODEL = "qwen3:4b"
+    """Camada única de IA: Gemini (nuvem, gratuito) ou Ollama (local).
+
+    O resto do código só chama ``extract_ingredients``, ``translate_options``
+    e ``translate_full_recipe``; o provedor é escolhido no ``.env``.
+    Se a IA falhar, a tradução cai para o dicionário local
+    (``localize_recipe_fallback``) em vez de mostrar o texto em inglês.
+    """
+
+    GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    TRANSLATION_RULES = (
+        "Você traduz receitas do inglês para o português do Brasil. "
+        "Use vocabulário culinário brasileiro (ex.: 'pimenta-do-reino', 'colher de sopa', "
+        "'xícara', 'frigideira', 'geladeira'). Use o imperativo nos passos ('Aqueça', 'Misture'). "
+        "Preserve todos os números, quantidades e a ordem dos itens. Não resuma, não junte nem "
+        "divida itens, não acrescente nada e não deixe trechos em inglês. "
+        "Responda somente com JSON válido, sem markdown."
+    )
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.http = requests.Session()
 
-    def _chat(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
-        model_name = kwargs.pop("model_name", self.settings.model)
-        return chat(
-            model=model_name,
-            messages=messages,
-            think=False,
-            options={"temperature": 0, **kwargs.pop("options", {})},
-            **kwargs,
+    # -- Chamada ao modelo ---------------------------------------------------
+
+    def _complete_json(self, system: str, payload: Any, *, max_tokens: int = 2048) -> dict[str, Any]:
+        user = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        if self.settings.llm_provider == "gemini":
+            content = self._gemini(system, user, max_tokens)
+        else:
+            content = self._ollama(system, user, max_tokens)
+        return parse_json_object(content)
+
+    def _gemini(self, system: str, user: str, max_tokens: int, _retry: bool = False) -> str:
+        response = self.http.post(
+            self.GEMINI_URL.format(model=self.settings.gemini_model),
+            headers={"x-goog-api-key": self.settings.gemini_api_key},
+            json={
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {
+                    "temperature": 0,
+                    "responseMimeType": "application/json",
+                    # Modelos com "raciocínio" gastam parte destes tokens
+                    # pensando; por isso a margem é maior que a resposta.
+                    "maxOutputTokens": max_tokens + 4096,
+                },
+            },
+            timeout=self.settings.request_timeout,
         )
+        if response.status_code == 429 and not _retry:
+            # Plano gratuito: limite de pedidos por minuto. Espera um pouco
+            # e tenta mais uma vez antes de cair no dicionário local.
+            LOGGER.warning("Gemini no limite por minuto (429); tentando de novo em 6 s")
+            time.sleep(6)
+            return self._gemini(system, user, max_tokens, _retry=True)
+        if response.status_code == 429:
+            raise RuntimeError("Limite gratuito do Gemini atingido (HTTP 429). Aguarde um pouco.")
+        if not response.ok:
+            raise RuntimeError(f"Gemini HTTP {response.status_code}: {response.text[:300]}")
+        data = response.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise RuntimeError(f"Gemini não retornou resposta: {data.get('promptFeedback')}")
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        text = "".join(part.get("text", "") for part in parts if not part.get("thought"))
+        if not text.strip():
+            raise RuntimeError("Gemini retornou uma resposta vazia.")
+        return text
+
+    def _ollama(self, system: str, user: str, max_tokens: int) -> str:
+        # Importado só aqui: quem usa Gemini não precisa ter o Ollama instalado.
+        from ollama import chat
+
+        response = chat(
+            model=self.settings.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            think=False,
+            format="json",
+            options={"temperature": 0, "num_predict": max_tokens, "repeat_penalty": 1.15},
+        )
+        return response.message.content or ""
+
+    # -- Ingredientes -------------------------------------------------------
 
     def extract_ingredients(self, text: str) -> dict[str, Any]:
-        response = self._chat([
-            {"role": "system", "content": (
-                "Extraia ingredientes da mensagem. Retorne somente JSON válido no formato "
-                '{"ingrediente_principal":"chicken","ingredientes_disponiveis":["chicken","potato","carrot"]}. '
-                "Traduza para inglês, preserve todos os ingredientes e não invente nenhum. "
-                "Escolha como ingrediente_principal o ingrediente mais adequado para buscar receitas. "
-                "O ingrediente_principal deve aparecer na lista."
-            )},
-            {"role": "user", "content": text},
-        ], format="json", options={"num_predict": 256})
-        data = parse_json_object(response.message.content or "")
+        data = self._complete_json(
+            "Extraia ingredientes da mensagem. Retorne somente JSON válido no formato "
+            '{"ingrediente_principal":"chicken","ingredientes_disponiveis":["chicken","potato","carrot"]}. '
+            "Traduza para inglês, preserve todos os ingredientes e não invente nenhum. "
+            "Escolha como ingrediente_principal o ingrediente mais adequado para buscar receitas. "
+            "O ingrediente_principal deve aparecer na lista. "
+            "Se a mensagem não citar nenhum alimento, retorne "
+            '{"ingrediente_principal":"","ingredientes_disponiveis":[]}.',
+            text,
+            max_tokens=256,
+        )
         principal = data.get("ingrediente_principal")
         ingredients = data.get("ingredientes_disponiveis")
         if not isinstance(principal, str) or not principal.strip() or not isinstance(ingredients, list):
@@ -478,117 +599,170 @@ class LLMService:
             "ingredientes_disponiveis": ingredients,
         }
 
+    def interpret(self, text: str) -> dict[str, Any]:
+        """Entende o pedido: um prato ("sorvete de laranja") ou ingredientes que a pessoa tem."""
+        data = self._complete_json(
+            "Você interpreta mensagens de um app de receitas e responde somente JSON válido no formato "
+            '{"tipo":"prato","busca":"orange ice cream","base":"ice cream",'
+            '"alternativas":["orange sorbet","sorbet","sherbet"],"ingredientes":[]}.\n'
+            'tipo "prato": a pessoa quer um prato, doce, bebida ou tipo de receita '
+            '(ex.: "sorvete", "bolo de chocolate", "quero fazer um sorvete de laranja", '
+            '"receita de lasanha", "uma sobremesa com morango"). Uma comida citada sozinha '
+            '(ex.: "sorvete", "frango", "panqueca") também é "prato". '
+            '"busca" é o nome em inglês, curto, com TODOS os detalhes pedidos '
+            '(ex.: "ice cream", "orange ice cream", "chocolate cake", "strawberry dessert"). '
+            '"base" é o prato sem sabor nem detalhe, em inglês (ex.: "orange ice cream" → "ice cream"; '
+            '"chocolate cake" → "cake"; "ice cream" → "ice cream"). '
+            '"alternativas" são até 3 sinônimos em inglês do prato pedido e do prato base, nunca categorias '
+            'genéricas como "dessert" ou "meal" (ex.: "ice cream" → ["sorbet", "sherbet", "gelato"]; '
+            '"orange ice cream" → ["orange sorbet", "sorbet", "sherbet"]; '
+            '"pancake" → ["crepe", "hotcake"]).\n'
+            'tipo "ingredientes": a pessoa lista o que tem em casa para aproveitar '
+            '(ex.: "tenho frango e arroz", "frango, arroz e cebola", "o que faço com ovo e queijo", '
+            '"sobrou carne moída"). "ingredientes" é a lista em inglês, no singular; '
+            '"busca" é o ingrediente mais importante da lista.\n'
+            'tipo "nada": a mensagem não fala de comida.\n'
+            "Nunca invente comidas que não estão na mensagem.",
+            text,
+            max_tokens=200,
+        )
+        kind = str(data.get("tipo", "")).strip().lower()
+        query = str(data.get("busca", "") or "").strip()
+        alternatives = [
+            str(item).strip() for item in data.get("alternativas") or [] if isinstance(item, str) and item.strip()
+        ]
+        ingredients = [
+            str(item).strip().lower()
+            for item in data.get("ingredientes") or []
+            if isinstance(item, str) and item.strip()
+        ]
+        if kind == "ingredientes" and ingredients:
+            principal = query.lower() if query.lower() in ingredients else ingredients[0]
+            return {"tipo": "ingredientes", "busca": principal, "ingredientes": list(dict.fromkeys(ingredients))}
+        if kind == "prato" and query:
+            # O prato base ("ice cream") entra logo depois da busca exata.
+            base = str(data.get("base", "") or "").strip()
+            alternatives = list(dict.fromkeys([base, *alternatives] if base else alternatives))
+            alternatives = [term for term in alternatives if term.casefold() != query.casefold()]
+            return {"tipo": "prato", "busca": query, "alternativas": alternatives}
+        return {"tipo": "nada"}
+
+    # -- Tradução -----------------------------------------------------------
+
+    @staticmethod
+    def _valid_text_list(value: Any, expected: int) -> bool:
+        return (
+            isinstance(value, list)
+            and len(value) == expected
+            and all(isinstance(item, str) and item.strip() for item in value)
+        )
+
     def translate_options(self, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        result = []
-        for original in options:
-            copy = dict(original)
-            copy["titulo_pt"] = original["titulo"]
-            copy["ingredientes_pt"] = original["ingredientes"][:4]
-            payload = {
-                "titulo": original["titulo"],
-                "ingredientes": original["ingredientes"][:4],
-            }
+        """Traduz todas as opções da lista em UMA chamada (antes era uma por opção)."""
+        payload = [
+            {"titulo": item["titulo"], "ingredientes": item["ingredientes"][:4]}
+            for item in options
+        ]
+        translated: list[Any] = []
+        if payload:
             try:
-                response = self._chat([
-                    {"role": "system", "content": (
-                        "Traduza o título e os ingredientes desta receita do inglês para português brasileiro. "
-                        "Não explique, não raciocine em texto, não inclua markdown e não copie o texto original. "
-                        "Preserve quantidades, unidades e ordem. Retorne somente JSON válido no formato "
-                        '{"titulo":"...","ingredientes":["..."]}'
-                    )},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ], model_name=self.TRANSLATION_MODEL, format="json", options={
-                    "num_predict": 384,
-                    "repeat_penalty": 1.25,
-                })
-                data = parse_json_object(response.message.content or "")
-                title = data.get("titulo")
-                ingredients = data.get("ingredientes")
-                expected_count = len(payload["ingredientes"])
-                if (
-                    isinstance(title, str) and title.strip()
-                    and isinstance(ingredients, list)
-                    and len(ingredients) == expected_count
-                    and all(isinstance(value, str) and value.strip() for value in ingredients)
-                ):
-                    copy["titulo_pt"] = title.strip()
-                    copy["ingredientes_pt"] = [
-                        normalize_ingredient_quantity(original_value, translated_value)
-                        for original_value, translated_value in zip(payload["ingredientes"], ingredients)
-                    ]
-                else:
-                    LOGGER.warning("Tradução incompleta da opção; exibindo dados originais.")
+                data = self._complete_json(
+                    self.TRANSLATION_RULES
+                    + ' Formato: {"receitas":[{"titulo":"...","ingredientes":["..."]}]} '
+                    "com o mesmo número de receitas e de ingredientes recebidos.",
+                    {"receitas": payload},
+                    max_tokens=1024,
+                )
+                translated = data.get("receitas") if isinstance(data.get("receitas"), list) else []
             except Exception as exc:
-                LOGGER.warning("Falha ao traduzir uma opção; exibindo dados originais: %s", exc)
+                LOGGER.warning("Falha ao traduzir as opções; usando o dicionário local: %s", exc)
+
+        result = []
+        for index, (original, sent) in enumerate(zip(options, payload)):
+            copy = dict(original)
+            item = translated[index] if index < len(translated) and isinstance(translated[index], dict) else {}
+            title = item.get("titulo")
+            ingredients = item.get("ingredientes")
+            if isinstance(title, str) and title.strip() and self._valid_text_list(ingredients, len(sent["ingredientes"])):
+                copy["titulo_pt"] = title.strip()
+                copy["ingredientes_pt"] = [
+                    normalize_ingredient_quantity(src, dst.strip())
+                    for src, dst in zip(sent["ingredientes"], ingredients)
+                ]
+            else:
+                fallback_title = translate_title_to_pt_br(sent["titulo"])
+                copy["titulo_pt"] = fallback_title[:1].upper() + fallback_title[1:]
+                copy["ingredientes_pt"] = [translate_ingredient_to_pt_br(v) for v in sent["ingredientes"]]
             result.append(copy)
         return result
 
     def translate_full_recipe(self, recipe: dict[str, Any]) -> dict[str, Any]:
-        """Traduz a receita em blocos curtos para evitar repetição do Ollama."""
-        common_system = (
-            "Traduza do inglês para português brasileiro. Não explique, não raciocine em texto, "
-            "não inclua markdown e retorne somente JSON válido. Preserve quantidades e informações. "
-            "Não copie o texto original."
-        )
+        """Traduz título, ingredientes e passos numa chamada só.
 
-        original_ingredients = recipe.get("ingredientes", [])
+        Se alguma parte vier incompleta, tenta de novo só os passos e, se
+        ainda assim falhar, usa o dicionário local para aquela parte.
+        """
+        original_title = recipe.get("titulo", "")
+        original_ingredients = list(recipe.get("ingredientes", []))
+        original_steps = list(recipe.get("passo_a_passo", []))
+        fallback = localize_recipe_fallback(recipe)
+
+        data: dict[str, Any] = {}
         try:
-            base_response = self._chat([
-                {"role": "system", "content": common_system +
-                    ' Retorne exatamente {"titulo":"...","ingredientes":["..."]}.'},
-                {"role": "user", "content": json.dumps({
-                    "titulo": recipe.get("titulo", ""),
+            data = self._complete_json(
+                self.TRANSLATION_RULES
+                + ' Formato: {"titulo":"...","ingredientes":["..."],"passo_a_passo":["..."]} '
+                "com o mesmo número de ingredientes e de passos recebidos.",
+                {
+                    "titulo": original_title,
                     "ingredientes": original_ingredients,
-                }, ensure_ascii=False)},
-            ], model_name=self.TRANSLATION_MODEL, format="json", options={
-                "num_predict": 768,
-                "repeat_penalty": 1.25,
-            })
-            base = parse_json_object(base_response.message.content or "")
-            title = base.get("titulo")
-            ingredients = base.get("ingredientes")
-            valid_base = (
-                isinstance(title, str) and title.strip()
-                and isinstance(ingredients, list)
-                and len(ingredients) == len(original_ingredients)
-                and all(isinstance(value, str) and value.strip() for value in ingredients)
+                    "passo_a_passo": original_steps,
+                },
+                max_tokens=3072,
             )
         except Exception as exc:
-            LOGGER.warning("Falha ao traduzir título e ingredientes; usando dados originais: %s", exc)
-            valid_base = False
+            LOGGER.warning("Falha ao traduzir a receita completa: %s", exc)
 
-        if not valid_base:
-            title = recipe.get("titulo", "")
-            ingredients = original_ingredients
+        title = data.get("titulo")
+        if not isinstance(title, str) or not title.strip():
+            title = fallback["titulo"]
 
-        steps = []
-        for original_step in recipe.get("passo_a_passo", []):
+        ingredients = data.get("ingredientes")
+        if self._valid_text_list(ingredients, len(original_ingredients)):
+            ingredients = [
+                normalize_ingredient_quantity(src, dst.strip())
+                for src, dst in zip(original_ingredients, ingredients)
+            ]
+        else:
+            ingredients = fallback["ingredientes"]
+
+        steps = data.get("passo_a_passo")
+        if not self._valid_text_list(steps, len(original_steps)) and original_steps:
             try:
-                step_response = self._chat([
-                    {"role": "system", "content": common_system +
-                        ' Traduza o passo inteiro e retorne exatamente {"passo":"..."}.'},
-                    {"role": "user", "content": json.dumps({"passo": original_step}, ensure_ascii=False)},
-                ], model_name=self.TRANSLATION_MODEL, format="json", options={
-                    "num_predict": 384,
-                    "repeat_penalty": 1.25,
-                })
-                step_data = parse_json_object(step_response.message.content or "")
-                translated_step = step_data.get("passo")
+                retry = self._complete_json(
+                    self.TRANSLATION_RULES
+                    + ' Formato: {"passo_a_passo":["..."]} com exatamente '
+                    f"{len(original_steps)} itens, um para cada passo recebido.",
+                    {"passo_a_passo": original_steps},
+                    max_tokens=2048,
+                )
+                steps = retry.get("passo_a_passo")
             except Exception as exc:
-                LOGGER.warning("Falha ao traduzir um passo; usando o texto original: %s", exc)
-                translated_step = None
-            if not isinstance(translated_step, str) or not translated_step.strip():
-                steps.append(original_step)
-            else:
-                steps.append(translated_step.strip())
+                LOGGER.warning("Falha ao traduzir os passos: %s", exc)
+                steps = None
+        used_fallback = not self._valid_text_list(steps, len(original_steps))
+        if used_fallback:
+            steps = fallback["passo_a_passo"]
 
         localized = dict(recipe)
-        localized["titulo"] = title.strip()
-        localized["ingredientes"] = [
-            normalize_ingredient_quantity(original_value, translated_value)
-            for original_value, translated_value in zip(original_ingredients, ingredients)
+        title = to_brazilian_portuguese(title.strip())
+        localized["titulo"] = title[:1].upper() + title[1:]
+        localized["ingredientes"] = ingredients
+        localized["passo_a_passo"] = [
+            normalize_culinary_phrasing(to_brazilian_portuguese(step.strip())) for step in steps
         ]
-        localized["passo_a_passo"] = steps
+        if used_fallback and original_steps:
+            localized["aviso"] = fallback.get("aviso")
         return localized
 
 
@@ -1089,7 +1263,13 @@ def calculate_compatibility(recipe: dict[str, Any], available: list[str]) -> dic
 def is_ingredient_request(text: str) -> bool:
     patterns = (
         r"\btenho\b",
+        r"\btemos\b",
         r"\bdisponho de\b",
+        r"\b(?:estou|t[oô]|fiquei) com\b",
+        r"\bsobr(?:ou|aram|ando)\b",
+        r"\busando\b",
+        r"\breceitas? (?:com|usando)\b",
+        r"\b(?:fazer|faço|faco|cozinhar|cozinho|preparar|preparo) (?:algo |alguma coisa )?com\b",
         r"na geladeira",
         r"na despensa",
         r"o que dá para",
@@ -1169,6 +1349,72 @@ def is_direct_food_query(text: str) -> bool:
     return normalized in DIRECT_FOOD_QUERIES
 
 
+def _words(text: str) -> list[str]:
+    """Palavras em minúsculas, sem plural simples ("cakes" → "cake")."""
+    stop = {"and", "with", "of", "the", "a", "an", "in", "for", "or"}
+    words = re.findall(r"[a-z0-9]+", (text or "").casefold())
+    return [w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words if w not in stop]
+
+
+def rank_by_relevance(
+    candidates: list[dict[str, Any]], query: str, alternatives: list[str] | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    """Fica só com as receitas que são o que a pessoa pediu e ordena.
+
+    A FatSecret devolve receitas com QUALQUER palavra da busca (por isso
+    "ice cream" trazia salmão com creme). Níveis, do melhor para o pior:
+      0. todas as palavras do pedido no nome ("Orange Ice Cream")
+      1. todas as palavras no nome/descrição/ingredientes e o prato base no nome
+         ("Banana Ice Cream" com suco de laranja nos ingredientes)
+      2. um sinônimo inteiro no nome ("Mango Sorbet" para "ice cream")
+      3. todas as palavras só na descrição/ingredientes
+      4. só parte das palavras no nome (usado apenas se não houver nada melhor)
+    No empate, receitas com foto vêm antes.
+    Retorna (lista, achou_exato), onde achou_exato = existe nível 0 ou 1.
+    """
+    wanted = set(_words(query))
+    synonyms = [set(_words(term)) for term in alternatives or [] if _words(term)]
+
+    def tier(item: dict[str, Any]) -> tuple[int, int]:
+        title = set(_words(item.get("titulo", "")))
+        rest = set(_words(item.get("descricao") or ""))
+        for line in item.get("ingredientes_busca") or []:
+            rest |= set(_words(line))
+        everything = title | rest
+        partial = len(wanted & title)
+        if wanted and wanted <= title:
+            return 0, partial
+        has_dish_name = any(syn <= title for syn in synonyms)
+        if wanted and wanted <= everything and has_dish_name:
+            return 1, partial
+        if has_dish_name:
+            return 2, partial
+        if wanted and wanted <= everything:
+            return 3, partial
+        if partial:
+            return 4, partial
+        return 5, 0
+
+    scored = [(tier(item), item) for item in candidates]
+    best = min((t for (t, _), _ in scored), default=5)
+    # Sinônimo no nome (nível 2) já é o prato pedido; o nível 3 (só nos
+    # ingredientes, ex.: cheesecake que leva sorvete) entra só se não houver nada melhor.
+    limit = 2 if best <= 2 else best
+    kept = [(t, item) for t, item in scored if t[0] <= limit]
+    kept.sort(key=lambda pair: (pair[0][0], -pair[0][1], not pair[1].get("imagem")))
+    return [item for _, item in kept], best <= 1
+
+
+def is_more_request(text: str) -> bool:
+    """"mais", "ver mais", "outras opções", "mostra mais receitas"..."""
+    normalized = normalize_choice(text).strip(" .!?")
+    return bool(re.fullmatch(
+        r"(?:(?:me )?(?:mostr[ae]|ver|quero(?: ver)?|manda|traga|tem) )?(?:mais|outras?|outros)"
+        r"(?: (?:opcoes|opcao|receitas?|sugestoes))?(?: por favor)?",
+        normalized,
+    ))
+
+
 def is_previous_recipe_request(text: str) -> bool:
     normalized = text.casefold()
     return any(term in normalized for term in ("última receita", "ultima receita", "receita anterior", "mostre novamente", "repita a receita"))
@@ -1187,6 +1433,9 @@ def format_recipe(recipe: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+RECIPE_NOT_IDENTIFIED = "Não identifiquei a receita. Informe o número ou o nome exato."
+
+
 class ChefApp:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -1202,76 +1451,141 @@ class ChefApp:
         self.llm = LLMService(settings)
         self.fatsecret = FatSecretClient(settings, self.state)
 
+    PAGE_SIZE = 6
+
     def search_and_prepare(
         self,
         query: str,
         *,
         available_ingredients: list[str] | None = None,
+        alternatives: list[str] | None = None,
     ) -> str:
+        self.state.ranked_rest = []
+        self.state.next_candidate = 0
         if available_ingredients:
             search_result = parse_json_object(
                 self.fatsecret.search_for_ingredients(query, available_ingredients)
             )
         else:
-            search_result = parse_json_object(self.fatsecret.search(query))
+            # Modo prato: busca o pedido ("orange ice cream") e até duas
+            # alternativas mais amplas ("orange sorbet", "ice cream"), junta
+            # tudo e ordena pela relevância em relação ao pedido original.
+            search_result = {}
+            merged: dict[str, dict[str, Any]] = {}
+            terms = list(dict.fromkeys([query, *(alternatives or [])]))[:5]
+            searches = [(query, 0), (query, 1), *((term, 0) for term in terms[1:])]
+            for term, page in searches:
+                result = parse_json_object(self.fatsecret.search(term, page))
+                LOGGER.info("Busca de prato %r: %s", term, result.get("resultado") or result.get("erro"))
+                if result.get("erro"):
+                    if not merged:
+                        search_result = result
+                    break
+                for item in result.get("receitas", []):
+                    merged.setdefault(item["recipe_id"], item)
+            if merged:
+                self.state.candidates, self.state.exact_match = rank_by_relevance(list(merged.values()), query, alternatives or [])
+                search_result = {"resultado": "receitas_encontradas"}
+            elif not search_result:
+                search_result = {"mensagem": "Não encontrei receitas para esse pedido na FatSecret. Tente outro nome."}
         if search_result.get("resultado") != "receitas_encontradas":
             if search_result.get("erro"):
                 detail = str(search_result.get("detalhes") or search_result.get("erro"))
                 LOGGER.error("FatSecret retornou erro na busca %r: %s", query, detail)
+                if "código=21" in detail:
+                    return "A FatSecret recusou a consulta agora (bloqueio de IP). Tente de novo em alguns segundos."
                 return f"A FatSecret retornou um erro na busca. Veja o terminal do servidor. Detalhe: {detail}"
             if search_result.get("erros"):
                 LOGGER.warning("FatSecret respondeu sem resultados para %r. Consultas: %s; erros: %s", query, search_result.get("consultas_realizadas"), search_result.get("erros"))
                 return "A FatSecret retornou erro ao pesquisar: " + " | ".join(map(str, search_result["erros"]))
             return search_result.get("mensagem", "Nenhuma receita encontrada.")
-        # No modo de aproveitamento, detalhamos todas as candidatas antes de
-        # escolher as três melhores. Pesquisar os três termos juntos não
-        # garante que as receitas contenham esses ingredientes.
-        limit = len(self.state.candidates) if available_ingredients else self.settings.max_recipe_options
-        details = parse_json_object(self.fatsecret.first_complete_options(limit))
-        if details.get("resultado") != "opcoes_recuperadas":
-            return "Não consegui recuperar receitas completas."
 
         if available_ingredients:
+            # No modo de aproveitamento, detalhamos todas as candidatas antes de
+            # ranquear. Pesquisar os termos juntos não garante que as receitas
+            # contenham esses ingredientes.
+            details = parse_json_object(self.fatsecret.first_complete_options(len(self.state.candidates)))
+            if details.get("resultado") != "opcoes_recuperadas":
+                return "Não consegui recuperar receitas completas."
             scored = [
                 calculate_compatibility(recipe, available_ingredients)
                 for recipe in self.state.detailed_options
             ]
-            # Uma receita que não usa nenhum ingrediente informado é ruído,
-            # não uma opção válida de aproveitamento.
-            scored = [
-                recipe
-                for recipe in scored
-                if recipe["compatibilidade"]["ingredientes_aproveitados"]
-            ]
+            # Uma receita que não usa nenhum ingrediente informado é ruído.
+            scored = [recipe for recipe in scored if recipe["compatibilidade"]["ingredientes_aproveitados"]]
             if not scored:
                 return "Não encontrei receitas que usem nenhum dos ingredientes informados."
-            scored.sort(
-                key=lambda recipe: recipe["compatibilidade"]["percentual_aproveitamento"],
-                reverse=True,
-            )
-            self.state.detailed_options = scored[: self.settings.max_recipe_options]
-        translated = self.llm.translate_options(self.state.detailed_options)
-        # As opções exibidas e as opções usadas na seleção precisam ser a
-        # mesma coleção. Antes, titulo_pt existia apenas numa variável local,
-        # por isso a seleção pelo nome traduzido nunca funcionava.
-        self.state.detailed_options = translated
-        lines = ["Encontrei estas opções de receitas:", ""]
-        for index, recipe in enumerate(translated, 1):
-            lines.append(f"{index}. {recipe['titulo_pt']}")
-            lines.append(f"   Alguns ingredientes: {', '.join(recipe['ingredientes_pt'])}")
+            # Maior aproveitamento primeiro; no empate, as que têm foto.
+            scored.sort(key=lambda r: (-r["compatibilidade"]["percentual_aproveitamento"], not r.get("imagem")))
+            page, self.state.ranked_rest = scored[: self.PAGE_SIZE], scored[self.PAGE_SIZE:]
+            self.state.detailed_options = []
+            return self.present_options(page, "Encontrei estas opções de receitas:")
+
+        details = parse_json_object(self.fatsecret.first_complete_options(self.PAGE_SIZE))
+        if details.get("resultado") != "opcoes_recuperadas":
+            return "Não consegui recuperar receitas completas."
+        page = self.state.detailed_options
+        self.state.detailed_options = []
+        intro = (
+            "Encontrei estas opções de receitas:"
+            if self.state.exact_match
+            else "Não achei uma receita exatamente assim na FatSecret. Estas são as mais parecidas:"
+        )
+        return self.present_options(page, intro)
+
+    def has_more_options(self) -> bool:
+        if self.state.ingredient_mode:
+            return bool(self.state.ranked_rest)
+        return self.state.next_candidate < len(self.state.candidates)
+
+    def more_options(self) -> str:
+        if not self.has_more_options():
+            return "Não tenho mais receitas para essa busca. Tente pedir outra coisa."
+        if self.state.ingredient_mode:
+            page = self.state.ranked_rest[: self.PAGE_SIZE]
+            self.state.ranked_rest = self.state.ranked_rest[self.PAGE_SIZE:]
+        else:
+            shown = self.state.detailed_options
+            self.fatsecret.first_complete_options(self.PAGE_SIZE, start=self.state.next_candidate)
+            page = self.state.detailed_options
+            self.state.detailed_options = shown
+            if not page:
+                return "Não tenho mais receitas para essa busca. Tente pedir outra coisa."
+        return self.present_options(page, "Mais opções de receitas:")
+
+    def present_options(self, page: list[dict[str, Any]], intro: str) -> str:
+        """Traduz uma página de opções, numera continuando a lista e monta texto + cards."""
+        translated = self.llm.translate_options(page)
+        first_number = len(self.state.detailed_options) + 1
+        # As opções exibidas e as usadas na seleção são a mesma coleção.
+        self.state.detailed_options = self.state.detailed_options + translated
+        self.state.has_more = self.has_more_options()
+        lines = [intro, ""]
+        payload = []
+        for number, recipe in enumerate(translated, first_number):
+            stats = []
             compatibility = recipe.get("compatibilidade")
             if compatibility:
-                lines.append(
-                    f"   Aproveitamento: {compatibility['percentual_aproveitamento']:.1f}%"
-                )
-                lines.append(
-                    "   Disponíveis usados: "
-                    + (", ".join(compatibility["ingredientes_aproveitados"]) or "nenhum")
-                )
-                lines.append(
-                    "   Ainda faltam: "
-                    + (", ".join(compatibility["ingredientes_nao_encontrados"]) or "nenhum dos informados")
-                )
+                stats = [
+                    f"Aproveitamento: {compatibility['percentual_aproveitamento']:.1f}%",
+                    "Disponíveis usados: "
+                    + (", ".join(translate_ingredient_to_pt_br(i) for i in compatibility["ingredientes_aproveitados"]) or "nenhum"),
+                    "Ainda faltam: "
+                    + (", ".join(translate_ingredient_to_pt_br(i) for i in compatibility["ingredientes_nao_encontrados"]) or "nenhum dos informados"),
+                ]
+            lines.append(f"{number}. {recipe['titulo_pt']}")
+            lines.append(f"   Alguns ingredientes: {', '.join(recipe['ingredientes_pt'])}")
+            lines.extend(f"   {line}" for line in stats)
+            payload.append({
+                "numero": number,
+                "titulo": recipe["titulo_pt"],
+                "imagem": recipe.get("imagem"),
+                "ingredientes": recipe["ingredientes_pt"],
+                "detalhes": stats,
+            })
+        self.state.options_payload = payload
+        if self.state.has_more:
+            lines.append("\nQuer ver outras? Escreva “mais”.")
         lines.append("\nQual você gostaria de preparar? Responda com o número ou nome.")
         return "\n".join(lines)
 
@@ -1297,63 +1611,74 @@ class ChefApp:
                 }
             ]
             if not matches:
-                return "Não identifiquei a receita. Informe o número ou o nome exato."
+                return RECIPE_NOT_IDENTIFIED
             recipe = matches[0]
         localized_recipe = self.llm.translate_full_recipe(recipe)
         self.state.selected_recipe = localized_recipe
         self.state.last_recipe = localized_recipe
         return format_recipe(localized_recipe)
 
-    def handle(self, text: str) -> str:
-        # Saudações não precisam consultar o modelo. Além de serem mais
-        # rápidas, isso evita que modelos de raciocínio produzam uma análise
-        # interna para uma mensagem que não exige ferramenta nenhuma.
-        if normalize_choice(text).strip() in {"oi", "ola", "bom dia", "boa tarde", "boa noite"}:
-            return "Olá! Sou o CustomChef. Como posso ajudar com receitas da FatSecret?"
+    def search_by_ingredients(self, ingredients: list[str], principal: str | None = None) -> str:
+        LOGGER.info("Ingredientes identificados: %s", ingredients)
+        self.state.available_ingredients = ingredients
+        self.state.ingredient_mode = True
+        # A busca inicial usa o ingrediente principal; a compatibilidade
+        # é calculada depois que os ingredientes reais da receita chegam.
+        return self.search_and_prepare(principal or ingredients[0], available_ingredients=ingredients)
 
-        if is_ingredient_request(text):
-            deterministic = extract_ingredients_deterministically(text)
-            if deterministic:
-                available = deterministic
-                principal = deterministic[0]
-            else:
-                data = self.llm.extract_ingredients(text)
-                available = data["ingredientes_disponiveis"]
-                principal = data["ingrediente_principal"]
-            self.state.available_ingredients = available
-            self.state.ingredient_mode = True
-            # A busca inicial usa o ingrediente principal; a compatibilidade
-            # é calculada somente depois que os ingredientes reais da receita
-            # forem recuperados da FatSecret.
-            return self.search_and_prepare(
-                principal,
-                available_ingredients=available,
-            )
+    def search_dish(self, query: str, alternatives: list[str] | None = None) -> str:
+        LOGGER.info("Prato pedido: %r (alternativas: %s)", query, alternatives)
+        self.state.available_ingredients = []
+        self.state.ingredient_mode = False
+        return self.search_and_prepare(query, alternatives=alternatives)
 
+    def interpret(self, text: str) -> dict[str, Any]:
+        """Usa a IA para entender o pedido; sem IA, usa as regras antigas."""
+        try:
+            return self.llm.interpret(text)
+        except Exception as exc:
+            LOGGER.warning("IA não conseguiu interpretar %r; usando regras locais: %s", text, exc)
         query = extract_recipe_query(text)
         if query:
-            self.state.available_ingredients.clear()
-            self.state.ingredient_mode = False
-            return self.search_and_prepare(translate_query(query))
-
+            return {"tipo": "prato", "busca": translate_query(query), "alternativas": []}
         if is_direct_food_query(text):
-            self.state.available_ingredients.clear()
-            self.state.ingredient_mode = False
-            return self.search_and_prepare(translate_query(text))
+            return {"tipo": "prato", "busca": translate_query(text), "alternativas": []}
+        ingredients = extract_ingredients_deterministically(text)
+        if ingredients:
+            return {"tipo": "ingredientes", "busca": ingredients[0], "ingredientes": ingredients}
+        return {"tipo": "nada"}
 
-        if self.state.detailed_options and self.state.selected_recipe is None:
-            return self.select_recipe(text)
+    def handle(self, text: str) -> str:
+        # Saudações não precisam consultar o modelo.
+        if normalize_choice(text).strip() in {"oi", "ola", "bom dia", "boa tarde", "boa noite"}:
+            return "Olá! Sou o NutriChef. Diga um prato (ex.: “sorvete”) ou o que você tem em casa (ex.: “tenho frango e arroz”)."
 
         if self.state.last_recipe and is_previous_recipe_request(text):
             return format_recipe(self.state.last_recipe)
 
-        # Não encaminha conversa genérica ao LLM. Isso evita gastar tokens de
-        # thinking em mensagens como "teste", "olá" ou perguntas fora do
-        # escopo, mantendo o CustomChef focado em receitas verificadas.
+        if self.state.candidates and is_more_request(text):
+            return self.more_options()
+
+        not_found = None
+        if self.state.detailed_options:
+            reply = self.select_recipe(text)
+            if reply != RECIPE_NOT_IDENTIFIED:
+                return reply
+            # Não era uma opção da lista: pode ser um novo pedido.
+            not_found = reply
+
+        intent = self.interpret(text)
+        LOGGER.info("Interpretação de %r: %s", text, intent)
+        if intent["tipo"] == "prato":
+            return self.search_dish(intent["busca"], intent.get("alternativas"))
+        if intent["tipo"] == "ingredientes":
+            return self.search_by_ingredients(intent["ingredientes"], intent.get("busca"))
+        if not_found:
+            return not_found
         return (
             "Posso ajudar a buscar receitas da FatSecret. "
-            "Diga os ingredientes que você tem ou escreva, por exemplo, "
-            "‘receita de arroz’."
+            "Diga um prato (ex.: “sorvete de laranja”) ou os ingredientes que você tem "
+            "(ex.: “tenho frango e arroz”)."
         )
 
 

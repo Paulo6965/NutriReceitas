@@ -1,0 +1,24 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "hosting": {
+    "public": ".",
+    "ignore": [
+      "firebase.json",
+      "firestore.rules",
+      ".firebaserc",
+      "**/.*",
+      "**/node_modules/**",
+      "backend/**",
+      "backup/**",
+      "NaDispensa-github/**",
+      "supabase/**",
+      "docs/**",
+      "**/*.py",
+      "**/*.bat",
+      "**/*.md",
+      "requirements.txt"
+    ]
+  }
+}

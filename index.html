@@ -369,6 +369,20 @@
     </div>
   </div>
 
+  <!-- ================= MODAL: PAINEL DO ADMINISTRADOR ================= -->
+  <div class="overlay" id="admin-modal" role="dialog" aria-modal="true" aria-labelledby="admin-title">
+    <div class="modal max-w-5xl">
+      <div class="modal-head">
+        <div><h3 id="admin-title" class="font-display">Painel do administrador</h3><p>Usuários, uso do site e gerenciamento de contas (dados do Firebase).</p></div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-secondary btn-sm" id="admin-refresh">↻ Atualizar</button>
+          <button class="icon-btn" data-close aria-label="Fechar">✕</button>
+        </div>
+      </div>
+      <div id="admin-body" class="p-6"></div>
+    </div>
+  </div>
+
   <!-- ================= MODAL: FAVORITOS ================= -->
   <div class="overlay" id="favs-modal" role="dialog" aria-modal="true" aria-labelledby="favs-title">
     <div class="modal max-w-4xl">
@@ -494,6 +508,7 @@
   <script src="js/modals.js"></script>
   <script src="js/notifications.js"></script>
   <script src="js/auth.js"></script>
+  <script src="js/admin.js"></script>
   <script src="js/main.js"></script>
 </body>
 </html>

@@ -1,0 +1,71 @@
+rules_version = '2';
+
+// Regras de segurança do Firestore — NutriReceitas / NaDispensa
+//
+// Estrutura do banco:
+//   users/{uid}            perfil: { name, email, role, disabled, createdAt, lastLoginAt }
+//   users/{uid}/kv/{chave} dados do usuário: favoritos, estoque, cozinhei, preferências...
+//
+// Resumo:
+//   - Cada pessoa lê e grava só os próprios dados.
+//   - Ninguém consegue se promover a admin nem se reativar sozinho.
+//   - Admin (role == "admin") lê tudo, muda papel/status e apaga dados de outros.
+//   - Conta desativada não consegue mais gravar dados.
+//
+// Publicar:  firebase deploy --only firestore:rules
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function profilePath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function isAdmin() {
+      return signedIn()
+        && exists(profilePath(request.auth.uid))
+        && get(profilePath(request.auth.uid)).data.role == 'admin';
+    }
+    function isActive(uid) {
+      return !exists(profilePath(uid)) || get(profilePath(uid)).data.get('disabled', false) != true;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+
+      // Primeiro login: o perfil nasce sempre como usuário comum e ativo.
+      allow create: if isOwner(uid)
+        && request.resource.data.role == 'user'
+        && request.resource.data.disabled == false;
+
+      // O próprio usuário só pode mudar nome, e-mail e último acesso.
+      // O admin pode mudar qualquer campo (inclusive role e disabled).
+      allow update: if isAdmin()
+        || (isOwner(uid)
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['name', 'email', 'lastLoginAt']));
+
+      allow delete: if isAdmin();
+
+      match /kv/{key} {
+        allow read:   if isOwner(uid) || isAdmin();
+        allow write:  if isOwner(uid) && isActive(uid);
+        allow delete: if (isOwner(uid) && isActive(uid)) || isAdmin();
+      }
+    }
+
+    // Mantidas como já estavam publicadas por um colega (18:32 de 11/11):
+    // contato/suporte e métricas. O admin agora é reconhecido pelo perfil.
+    match /support/{docId} {
+      allow create: if signedIn();
+      allow read: if isAdmin() || (signedIn() && request.auth.token.role == 'admin');
+    }
+    match /metrics/{docId} {
+      allow read, write: if signedIn();
+    }
+
+    // Qualquer outro caminho fica fechado.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

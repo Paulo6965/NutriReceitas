@@ -232,10 +232,7 @@ const chefMarkdown = (value) => {
           </div>
           <div class="recipe-chat-body">
             ${c.ingredients ? `
-              <div class="recipe-chat-section-title">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/></svg>
-                Ingredientes destacados
-              </div>
+              <div class="recipe-chat-section-title">Ingredientes destacados</div>
               <ul class="recipe-chat-list">
                 ${c.ingredients.split(',').map(i => `<li class="recipe-chat-item"><span class="bullet">•</span><span>${esc(i.trim())}</span></li>`).join('')}
               </ul>
@@ -263,6 +260,29 @@ const chefMarkdown = (value) => {
     .replace(/\n/g, '<br>');
   return html;
 };
+// Cards das opções vindas do NutriChef (com foto quando a FatSecret tem).
+// Só aceitamos https sem aspas na URL da foto, porque ela vai para o src.
+const safeImg = (url) => (typeof url === 'string' && /^https:\/\/[^\s"'<>]+$/.test(url) ? url : '');
+const chefOptionsHtml = (reply, options, hasMore) => {
+  const intro = String(reply || '').split('\n')[0] || 'Encontrei estas opções de receitas:';
+  const cards = options.map(o => {
+    const img = safeImg(o.imagem);
+    const ings = Array.isArray(o.ingredientes) ? o.ingredientes : [];
+    const stats = Array.isArray(o.detalhes) ? o.detalhes : [];
+    return `
+      <button type="button" class="chef-opt ${img ? 'has-img' : ''}" data-chef-pick="${esc(String(o.numero))}" aria-label="Ver receita ${esc(String(o.numero))}: ${esc(o.titulo)}">
+        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.closest('.chef-opt').classList.remove('has-img');this.remove()">` : ''}
+        <span class="chef-opt-body">
+          <span class="chef-opt-title"><b>${esc(String(o.numero))}.</b> ${esc(o.titulo)}</span>
+          ${ings.length ? `<span class="chef-opt-ings">${esc(ings.join(', '))}</span>` : ''}
+          ${stats.map(s => `<span class="chef-opt-stat">${esc(s)}</span>`).join('')}
+        </span>
+      </button>`;
+  }).join('');
+  const more = hasMore ? '<button type="button" class="btn btn-secondary btn-sm mt-2" data-chef-more>Ver mais receitas</button>' : '';
+  return `<p class="mb-2 font-medium">${esc(intro)}</p><div class="chef-opts">${cards}</div>${more}
+    <p class="mt-2 text-xs text-[var(--ink-3)]">Toque numa receita ou responda com o número.</p>`;
+};
 async function handleChat(text) {
   if (!state.user) {
     toast('Faça login ou crie sua conta para conversar com o NutriChef!');
@@ -286,7 +306,9 @@ async function handleChat(text) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.reply || data.error || 'backend_offline');
-    let html = chefMarkdown(data.reply);
+    let html = Array.isArray(data.options) && data.options.length
+      ? chefOptionsHtml(data.reply, data.options, data.hasMore)
+      : chefMarkdown(data.reply);
     if (data.recipe && data.recipe.recipe_id) {
       const key = `fatsecret-${String(data.recipe.recipe_id)}`;
       window.__chefChatRecipes.set(key, data.recipe);
@@ -308,6 +330,10 @@ chatLog.addEventListener('click', e => {
     if (recipe && typeof openChefRecipe === 'function') openChefRecipe(recipe);
     return;
   }
+  const pick = e.target.closest('[data-chef-pick]');
+  if (pick) return handleChat(pick.dataset.chefPick);
+  const more = e.target.closest('[data-chef-more]');
+  if (more) { more.remove(); return handleChat('mais'); }
   const b = e.target.closest('[data-open]'); if (b) return openRecipe(b.dataset.open);
   if (e.target.closest('[data-expiring]')) handleChat('Usar o que vence primeiro');
   // Confirmação da correção: "Você quis dizer arroz?"
