@@ -8,7 +8,7 @@ Site de receitas com o **NutriChef**, um assistente que sugere receitas a partir
 
 O site atualmente roda pelo Azure, no seguinte endereço: 
 ``nutrireceitas.brazilsouth.cloudapp.azure.com``
-Devido a questão com custos, ele fica disponível entre: 07AM até 10PM (07:00 até 22:00)
+Devido a questão com custos, ele fica disponível entre: **07AM até 10PM** (**07:00** até **22:00**)
 
 Não há etapa de build e **o site funciona sem internet**: Tailwind, fontes e fotos estão dentro da pasta (`vendor/`, `fonts/`, `Imagens/`). Só a entrada por voz usa serviços online.
 
